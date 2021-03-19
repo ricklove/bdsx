@@ -1,7 +1,10 @@
 node_modules
 /bedrock_server/*
+!/bedrock_server/worlds
+!/bedrock_server/server.properties
 !/bedrock_server/vcruntime140_1.dll
 !/bedrock_server/dbghelp.dll
 /npm-debug.log
 /pdbcache_by_example.ini
 *.js
+love-family-server/src
