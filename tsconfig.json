@@ -5,7 +5,9 @@
   ],
   "compilerOptions": {
     "target": "es2017",
-    "lib": [ "es2017" ],
+    "lib": [
+      "es2017"
+    ],
     "module": "CommonJS",
     "moduleResolution": "Node",
     "alwaysStrict": true,
@@ -15,6 +17,7 @@
     "resolveJsonModule": true,
     "inlineSourceMap": true,
     "importHelpers": true,
-    "experimentalDecorators": true
+    "experimentalDecorators": true,
+    "esModuleInterop": true,
   }
 }
