@@ -36,6 +36,8 @@ class PromCounter {
 
 const BDSX_SCOPE = '@bdsx/';
 
+export const loadedPlugins: string[] = [];
+
 export async function loadAllPlugins():Promise<void> {
     let packagejsonModified = false;
     const projpath = path.resolve(process.cwd(), process.argv[1]);
@@ -48,7 +50,7 @@ export async function loadAllPlugins():Promise<void> {
         counter.ref();
         taskQueue.run(async()=>{
             try {
-                const jsonpath = require.resolve(name+'/package.json');
+                const jsonpath = require.resolve(`${name}/package.json`);
                 const json = JSON.parse(await fsp.readFile(jsonpath, 'utf-8'));
                 if (json.bdsxPlugin) {
                     await loadPackageJson(name, json, false);
@@ -157,6 +159,7 @@ export async function loadAllPlugins():Promise<void> {
             let index = 0;
             for (const name of loaded) {
                 try {
+                    loadedPlugins.push(name);
                     console.log(colors.green(`[BDSX-Plugins] (${++index}/${loaded.size}) ${name}`));
                     require(name);
                 } catch (err) {
@@ -166,6 +169,6 @@ export async function loadAllPlugins():Promise<void> {
             }
         }
     } catch (err) {
-        console.error(colors.red(`[BDSX-Plugins] `+err.message));
+        console.error(colors.red(`[BDSX-Plugins] ${err.message}`));
     }
 }

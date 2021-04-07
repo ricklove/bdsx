@@ -24,6 +24,7 @@ export abstract class Wrapper<T> extends NativeClass {
             value:any;
             type:Type<T>;
         }
+        Object.defineProperty(TypedWrapper, 'name', {value: type.name});
         TypedWrapper.prototype.type = type;
         TypedWrapper.define({value:type});
         return TypedWrapper;
@@ -44,7 +45,7 @@ export abstract class Wrapper<T> extends NativeClass {
             Object.defineProperty(ptr, key, {
                 get(){
                     return obj;
-                }, 
+                },
                 set(v:Wrapper<any>){
                     obj = v;
                     ptr.setPointer(v, offset);
@@ -92,13 +93,17 @@ export class CxxStringWrapper extends NativeClass {
         abstract();
     }
 
+    [NativeType.ctor_copy](other:CxxStringWrapper):void {
+        abstract();
+    }
+
     /**
      * @deprecated use .destruct
      */
     dispose():void {
         this.destruct();
     }
-    
+
     get value():string {
         return this.getCxxString();
     }
@@ -141,8 +146,12 @@ CxxStringWrapper.define({
 });
 const strctor = CxxString[NativeType.ctor];
 const strdtor = CxxString[NativeType.dtor];
+const strctor_copy = CxxString[NativeType.ctor_copy];
 CxxStringWrapper.prototype[NativeType.ctor] = function(this:CxxStringWrapper) { return strctor(this as any); };
 CxxStringWrapper.prototype[NativeType.dtor] = function(this:CxxStringWrapper) { return strdtor(this as any); };
+CxxStringWrapper.prototype[NativeType.ctor_copy] = function(this:CxxStringWrapper, other:CxxStringWrapper) {
+    return strctor_copy(this as any, other as any);
+};
 
 /** @deprecated renamed to CxxStringWrapper */
 export type CxxStringStructure = CxxStringWrapper;

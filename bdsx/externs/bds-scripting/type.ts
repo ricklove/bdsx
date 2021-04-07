@@ -94,7 +94,7 @@ export class DocField {
                 } else switch (name) {
                 case 'ticking_area': ntype.inlineTypeName = 'ITickingArea'; break;
                 }
-            } 
+            }
         }
         if (defval) {
             desc += `\n@default ${defval}`;
@@ -131,6 +131,13 @@ export class DocMethod {
                 if (reg === null) continue;
                 const fieldfix = DocType.fromDocFix(docfix[param] as DocFixItem);
                 method.params[+reg[1]] = new DocField(reg[2], fieldfix);
+            }
+            for (let i=0;i<method.params.length;i++) {
+                if (!method.params[i]) {
+                    console.error(`${method.name}: ${i+1} parameter is not provided`);
+                    method.params.length = i;
+                    break;
+                }
             }
             if (docfix.return !== undefined) {
                 method.return = DocType.fromDocFix(docfix.return);
@@ -383,7 +390,7 @@ export class DocType {
 
         if (name !== '') {
             name = styling.toFieldName(name);
-            if (!opts.ignoreReadonly && this.readonly) name = 'readonly '+name;
+            if (!opts.ignoreReadonly && this.readonly) name = `readonly ${name}`;
             if (!opts.ignoreOptional && this.optional) name += '?';
             name += ':';
         }
@@ -391,9 +398,9 @@ export class DocType {
         if (this.isVectorXYZ()) {
             out += 'VectorXYZ';
         } else {
-            const tabi = tab+ '    ';
+            const tabi = `${tab}    `;
             if (this.inlineTypeName) {
-                out += this.inlineTypeName.replace(/\n/g, '\n'+tabi);
+                out += this.inlineTypeName.replace(/\n/g, `\n${tabi}`);
             } else {
                 out +='{\n';
                 for (const field of this.fields) {

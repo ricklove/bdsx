@@ -8,6 +8,7 @@ import { CxxStringWrapper } from "bdsx/pointer";
 import { AttributeId, AttributeInstance, BaseAttributeMap } from "./attribute";
 import { BlockSource } from "./block";
 import { Vec3 } from "./blockpos";
+import { CommandPermissionLevel } from "./command";
 import { Dimension } from "./dimension";
 import { NetworkIdentifier } from "./networkidentifier";
 import { ServerPlayer } from "./player";
@@ -41,50 +42,51 @@ export class Actor extends NativeClass {
     protected _getName():CxxStringWrapper {
         abstract();
     }
-
+    protected _setName(name:CxxStringWrapper):void {
+        abstract();
+    }
     protected _addTag(tag:CxxStringWrapper):boolean {
         abstract();
     }
-
     protected _hasTag(tag:CxxStringWrapper):boolean {
         abstract();
     }
-
     protected _sendNetworkPacket(packet:VoidPointer):void {
         abstract();
     }
-
     protected _sendAttributePacket(id:AttributeId, value:number, attr:AttributeInstance):void {
         abstract();
     }
-
     sendPacket(packet:StaticPointer):void {
         if (!this.isPlayer()) throw Error("this is not ServerPlayer");
         this._sendNetworkPacket(packet);
     }
-
     private _getDimensionId(out:Int32Array):void {
         abstract();
     }
-
     getDimension():DimensionId {
         const out = new Int32Array(1);
         this._getDimensionId(out);
         return out[0];
     }
-
     /**
      * @deprecated use actor.identifier
      */
     getIdentifier():string {
         return this.identifier;
     }
-
     isPlayer():this is ServerPlayer {
         abstract();
     }
     getName():string {
         return this._getName().value;
+    }
+    setName(name:string):void {
+        const _name = new CxxStringWrapper(true);
+        _name.construct();
+        _name.value = name;
+        this._setName(_name);
+        _name.destruct();
     }
     getNetworkIdentifier():NetworkIdentifier {
         throw Error(`this is not player`);
@@ -104,43 +106,40 @@ export class Actor extends NativeClass {
     getUniqueIdBin():bin64_t {
         return this.getUniqueIdPointer().getBin64();
     }
-
     /**
      * it returns address of the unique id field
      */
     getUniqueIdPointer():StaticPointer {
         abstract();
     }
-
     getTypeId():ActorType {
         abstract();
     }
-
+    getCommandPermissionLevel():CommandPermissionLevel {
+        abstract();
+    }
     getAttribute(id:AttributeId):number {
         const attr = this.attributes.getMutableInstance(id);
         if (attr === null) return 0;
         return attr.currentValue;
     }
-
     setAttribute(id:AttributeId, value:number):void {
         if (id < 1) return;
         if (id > 15) return;
 
         const attr = this.attributes.getMutableInstance(id);
-        if (attr === null) throw Error(`${this.identifier} has not ${AttributeId[id] || 'Attribute'+id}`);
+        if (attr === null) throw Error(`${this.identifier} has not ${AttributeId[id] || `Attribute${id}`}`);
         attr.currentValue = value;
         if (this.isPlayer()) {
             this._sendAttributePacket(id, value, attr);
         }
     }
-
     /**
      * @deprecated use actor.runtimeId
      */
     getRuntimeId():NativePointer {
         return this.runtimeId.add();
     }
-
     /**
      * @deprecated Need more implement
      */
@@ -174,7 +173,6 @@ export class Actor extends NativeClass {
         _tag.destruct();
         return ret;
     }
-
 // float NativeActor::getAttribute(int attribute) noexcept
 // {
 //     if (attribute < 1) return 0;
@@ -183,11 +181,9 @@ export class Actor extends NativeClass {
 //     if (!attr) return 0;
 //     return attr->currentValue();
 // }
-
     static fromUniqueIdBin(bin:bin64_t):Actor|null {
         abstract();
     }
-
     static fromUniqueId(lowbits:number, highbits:number):Actor|null {
         return Actor.fromUniqueIdBin(bin.make64(lowbits, highbits));
     }
@@ -201,7 +197,6 @@ export class Actor extends NativeClass {
     static all():IterableIterator<Actor> {
         abstract();
     }
-
     private static _singletoning(ptr:StaticPointer):Actor|null {
         abstract();
     }

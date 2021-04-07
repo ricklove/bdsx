@@ -59,7 +59,7 @@ export class ServerNetworkHandler extends NativeClass {
     motd: CxxString;
     @nativeField(int32_t, 0x2D0)
     maxPlayers: int32_t;
-    
+
     protected _disconnectClient(client:NetworkIdentifier, b:number, message:CxxStringWrapper, d:number):void {
         abstract();
     }

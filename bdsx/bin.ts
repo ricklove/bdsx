@@ -50,13 +50,13 @@ function add_with_offset(a:number[], b:string, offset:number):void {
 
 export namespace bin
 {
-    export function uint8(value:string):number {        
+    export function uint8(value:string):number {
         return value.length !== 0 ? value.charCodeAt(0) & 0xff : 0;
     }
-    export function uint16(value:string):number {        
+    export function uint16(value:string):number {
         return value.length !== 0 ? value.charCodeAt(0) : 0;
     }
-    export function int32(value:string):number {    
+    export function int32(value:string):number {
         if (value.length >= 2) {
             return (value.charCodeAt(1) << 16) | value.charCodeAt(0);
         } else if (value.length === 0) {
@@ -65,7 +65,7 @@ export namespace bin
             return value.charCodeAt(0);
         }
     }
-    export function int32_high(value:string):number {    
+    export function int32_high(value:string):number {
         if (value.length >= 4) {
             return (value.charCodeAt(3) << 16) | value.charCodeAt(2);
         } else if (value.length >= 3) {
@@ -74,7 +74,7 @@ export namespace bin
             return 0;
         }
     }
-    export function int32_2(value:string):[number, number] {    
+    export function int32_2(value:string):[number, number] {
         if (value.length >= 4) {
             return [
                 (value.charCodeAt(1) << 16) | value.charCodeAt(0),
@@ -133,7 +133,7 @@ export namespace bin
     export function makeVar(n:number):string {
         n = Math.floor(n);
         if (n < 0) n = 0;
-        
+
         const out:number[] = [];
         for (let i=0;n !== 0;i++) {
             out[i] = n % 0x10000;
@@ -144,7 +144,7 @@ export namespace bin
     export function make(n:number, size:number):string {
         n = Math.floor(n);
         if (n < 0) n = 0;
-        
+
         const out:number[] = new Array(size);
         for (let i=0;i<size;i++) {
             out[i] = n % 0x10000;
@@ -155,7 +155,7 @@ export namespace bin
     export function fromBuffer(buffer:Uint8Array, pad:number = 0):string {
         const dest = new Uint16Array((buffer.length+1)>>1);
         const words = buffer.length & ~1;
-        
+
         let j = 0;
         let i = 0;
         for (;i!==words;) {
@@ -349,6 +349,56 @@ export namespace bin
             out[i] = maxstr.charCodeAt(i);
         }
         return String.fromCharCode(...out);
+    }
+    /**
+     * bitwise shift right
+     */
+    export function bitshr(a:string, shift:number):string {
+        const len = a.length;
+        const values:number[] = new Array(len);
+
+        let srci = (shift+15) >> 4;
+        shift -= (srci << 4) - 16;
+
+        const ishift = 16 - shift;
+        let dsti=0;
+        let v = 0;
+        if (srci !== 0) {
+            v = a.charCodeAt(srci-1) >> shift;
+        }
+        while (srci<len) {
+            const c = a.charCodeAt(srci++);
+            v |= c << ishift;
+            values[dsti++] = v;
+            v <<= 16;
+            v |= c >> shift;
+        }
+        while (dsti<len) {
+            values[dsti++] = 0;
+        }
+        return String.fromCharCode(...values);
+    }
+    /**
+     * bitwise shift right
+     */
+    export function bitshl(a:string, shift:number):string {
+        const len = a.length;
+        const values:number[] = new Array(len);
+
+        let dsti = shift >> 4;
+        shift &= 0xf;
+
+        let srci=0;
+        let v = 0;
+        for (let i=0;i<dsti;i++) {
+            values[i++] = 0;
+        }
+        while (dsti<len) {
+            v |= a.charCodeAt(srci++) << shift;
+            values[dsti++] = v;
+            v >>= 16;
+        }
+        return String.fromCharCode(...values);
     }
     export function neg(a:string):string {
         const n = a.length;

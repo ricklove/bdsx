@@ -1,41 +1,36 @@
 import asmcode = require("bdsx/asm/asmcode");
 import { Register } from "bdsx/assembler";
 import { BlockPos, Vec3 } from "bdsx/bds/blockpos";
-import { CommandOrigin, PlayerCommandOrigin, ScriptCommandOrigin, ServerCommandOrigin } from "bdsx/bds/commandorigin";
 import { LoopbackPacketSender } from "bdsx/bds/loopbacksender";
 import { StaticPointer, VoidPointer } from "bdsx/core";
 import { CxxVector } from "bdsx/cxxvector";
 import { makefunc, RawTypeId } from "bdsx/makefunc";
 import { mce } from "bdsx/mce";
-import { bin64_t, CxxString, float32_t, int32_t, NativeType, uint16_t, uint8_t } from "bdsx/nativetype";
+import { CxxString, float32_t, NativeType, uint8_t } from "bdsx/nativetype";
 import { CxxStringWrapper } from "bdsx/pointer";
 import { SharedPtr } from "bdsx/sharedpointer";
 import { Actor, ActorRuntimeID } from "./actor";
 import { AttributeId, AttributeInstance, BaseAttributeMap } from "./attribute";
-import { CommandContext, CommandOutputSender, CommandRegistry, MCRESULT, MinecraftCommands } from "./command";
+import { Block, BlockLegacy, BlockSource } from "./block";
+import { MinecraftCommands } from "./command";
 import { Certificate, ConnectionRequest } from "./connreq";
 import { Dimension } from "./dimension";
 import { GameMode } from "./gamemode";
+import { HashedString } from "./hashedstring";
 import { Item, ItemStack, PlayerInventory } from "./inventory";
 import { Level, ServerLevel } from "./level";
+import { CompoundTag } from "./nbt";
 import { networkHandler, NetworkHandler, NetworkIdentifier, ServerNetworkHandler } from "./networkidentifier";
 import { ExtendedStreamReadResult, Packet } from "./packet";
 import { AttributeData, UpdateAttributesPacket } from "./packets";
 import { BatchedNetworkPeer, EncryptedNetworkPeer } from "./peer";
 import { Player, ServerPlayer } from "./player";
 import { proc, procHacker } from "./proc";
-import { RakNet } from "./raknet";
 import { RakNetInstance } from "./raknetinstance";
 import { DedicatedServer, EntityRegistryOwned, Minecraft, Minecraft$Something, MinecraftEventing, MinecraftServerScriptEngine, PrivateKeyManager, ResourcePackManager, ScriptFramework, serverInstance, ServerInstance, ServerMetrics, VanilaGameModuleServer, VanilaServerGameplayEventListener, Whitelist } from "./server";
 import { BinaryStream } from "./stream";
-import { Block, BlockLegacy, BlockSource } from "./block";
-import { HashedString } from "./hashedstring";
 
 // avoiding circular dependency
-
-// raknet.ts
-RakNet.SystemAddress.prototype.ToString = procHacker.js("?ToString@SystemAddress@RakNet@@QEBAX_NPEADD@Z", RawTypeId.Void, {this: RakNet.SystemAddress}, RawTypeId.Boolean, RawTypeId.Buffer, RawTypeId.Int32);
-RakNet.RakPeer.prototype.GetSystemAddressFromIndex = makefunc.js([0xf0], RakNet.SystemAddress, {this:RakNet.RakPeer, structureReturn: true}, RawTypeId.Int32);
 
 // level.ts
 Level.prototype.createDimension = procHacker.js("Level::createDimension", Dimension, {this:Level}, RawTypeId.Int32);
@@ -48,87 +43,6 @@ ServerLevel.abstract({
     packetSender:[LoopbackPacketSender.ref(), 0x830],
     actors:[CxxVector.make(Actor.ref()), 0x1590],
 });
-
-// commandorigin.ts
-CommandOrigin.define({
-    vftable:VoidPointer,
-    uuid:mce.UUID,
-    level:ServerLevel.ref(),
-});
-PlayerCommandOrigin.abstract({});
-ScriptCommandOrigin.abstract({});
-ServerCommandOrigin.abstract({}, 0x58);
-
-const ServerCommandOrigin_vftable = proc["ServerCommandOrigin::`vftable'"];
-ServerCommandOrigin.prototype.isServerCommandOrigin = function() {
-    return this.vftable.equals(ServerCommandOrigin_vftable);
-};
-
-// void destruct(CommandOrigin* origin);
-CommandOrigin.prototype.destruct = makefunc.js([0x00], RawTypeId.Void, {this: CommandOrigin});
-
-// std::string CommandOrigin::getRequestId();
-const getRequestId = makefunc.js([0x08], CxxStringWrapper, {this: CommandOrigin, structureReturn: true});
-CommandOrigin.prototype.getRequestId = function():string {
-    const p = getRequestId.call(this) as CxxStringWrapper;
-    const str = p.value;
-    p.destruct();
-    return str;
-};
-
-// std::string CommandOrigin::getName();
-const getName = makefunc.js([0x10], CxxStringWrapper, {this: CommandOrigin, structureReturn: true});
-CommandOrigin.prototype.getName = function():string {
-    const p = getName.call(this) as CxxStringWrapper;
-    const str = p.value;
-    p.destruct();
-    return str;
-};
-
-// BlockPos CommandOrigin::getBlockPosition();
-CommandOrigin.prototype.getBlockPosition = makefunc.js([0x18], BlockPos, {this: CommandOrigin, structureReturn: true});
-
-// Vec3 getWorldPosition(CommandOrigin* origin);
-CommandOrigin.prototype.getWorldPosition = makefunc.js([0x20], Vec3, {this: CommandOrigin, structureReturn: true});
-
-// Level* getLevel(CommandOrigin* origin);
-CommandOrigin.prototype.getLevel = makefunc.js([0x28], Level, {this: CommandOrigin});
-
-// Dimension* (*getDimension)(CommandOrigin* origin);
-CommandOrigin.prototype.getDimension = makefunc.js([0x30], Dimension, {this: CommandOrigin});
-
-// Actor* getEntity(CommandOrigin* origin);
-CommandOrigin.prototype.getEntity = makefunc.js([0x30], Actor, {this: CommandOrigin});
-
-// command.ts
-MinecraftCommands.abstract({
-    sender:CommandOutputSender.ref(),
-    registry:CommandRegistry.ref(),
-    u2:bin64_t,
-    minecraft:Minecraft.ref(),
-});
-MinecraftCommands.prototype.executeCommand = procHacker.js('MinecraftCommands::executeCommand', MCRESULT, {this: MinecraftCommands, structureReturn:true }, SharedPtr.make(CommandContext), RawTypeId.Boolean);
-
-CommandRegistry.Signature.abstract({
-    command:CxxString,
-    description:CxxString,
-    overloads:CxxVector.make<CommandRegistry.Overload>(CommandRegistry.Overload),
-});
-
-CommandRegistry.prototype.registerOverloadInternal = procHacker.js('CommandRegistry::registerOverloadInternal', RawTypeId.Void, {this:CommandRegistry}, CommandRegistry.Signature, CommandRegistry.Overload);
-
-(CommandRegistry.prototype as any)._registerCommand = procHacker.js("CommandRegistry::registerCommand", RawTypeId.Void, {this:CommandRegistry}, CxxStringWrapper, RawTypeId.StringUtf8, RawTypeId.Int32, RawTypeId.Int32, RawTypeId.Int32);
-
-(CommandRegistry.prototype as any)._findCommand = procHacker.js("CommandRegistry::findCommand", CommandRegistry.Signature, {this:CommandRegistry, nullableReturn: true}, CxxStringWrapper);
-
-CommandRegistry.Overload.define({
-    commandVersion:bin64_t,
-    allocator:VoidPointer,
-    u3:bin64_t,
-    u4:bin64_t,
-    u5:bin64_t,
-    u6:int32_t,
-}, 0x30);
 
 // actor.ts
 const actorMaps = new Map<string, Actor>();
@@ -162,14 +76,15 @@ Actor.abstract({
 });
 (Actor.prototype as any)._sendNetworkPacket = procHacker.js("ServerPlayer::sendNetworkPacket", RawTypeId.Void, {this:Actor}, VoidPointer);
 (Actor.prototype as any)._getName = procHacker.js("Actor::getNameTag", CxxStringWrapper, {this:Actor});
+(Actor.prototype as any)._setName = procHacker.js("Actor::setNameTag", RawTypeId.Void, {this:Actor}, CxxStringWrapper);
 (Actor.prototype as any)._addTag = procHacker.js("Actor::addTag", RawTypeId.Boolean, {this:Actor}, CxxStringWrapper);
 (Actor.prototype as any)._hasTag = procHacker.js("Actor::hasTag", RawTypeId.Boolean, {this:Actor}, CxxStringWrapper);
 Actor.prototype.getPosition = procHacker.js("Actor::getPos", Vec3, {this:Actor});
 Actor.prototype.getRegion = procHacker.js("Actor::getRegionConst", BlockSource, {this:Actor});
 Actor.prototype.getUniqueIdPointer = procHacker.js("Actor::getUniqueID", StaticPointer, {this:Actor});
-
 Actor.prototype.getTypeId = makefunc.js([0x518], RawTypeId.Int32, {this:Actor}); // ActorType getEntityTypeId()
 (Actor.prototype as any)._getDimensionId = makefunc.js([0x568], RawTypeId.Void, {this:Actor}, RawTypeId.Buffer); // DimensionId* getDimensionId(DimensionId*)
+Actor.prototype.getCommandPermissionLevel = makefunc.js([0x620], RawTypeId.Int32, {this:Actor});
 
 Actor.fromUniqueIdBin = function(bin) {
     return serverInstance.minecraft.something.level.fetchEntity(bin, true);
@@ -227,9 +142,11 @@ procHacker.hookingRawWithCallOriginal('Actor::~Actor', asmcode.actorDestructorHo
 (Player.prototype as any)._setName = procHacker.js("Player::setName", RawTypeId.Void, {this: Player}, CxxStringWrapper);
 Player.prototype.changeDimension = procHacker.js("ServerPlayer::changeDimension", RawTypeId.Void, {this:Player}, RawTypeId.Int32, RawTypeId.Boolean);
 Player.prototype.teleportTo = procHacker.js("Player::teleportTo", RawTypeId.Void, {this:Player}, Vec3, RawTypeId.Boolean, RawTypeId.Int32, RawTypeId.Int32, RawTypeId.Bin64);
+Player.prototype.getGameType = procHacker.js("Player::getPlayerGameType", RawTypeId.Int32, {this:Player});
 Player.prototype.getInventory = procHacker.js("Player::getSupplies", PlayerInventory, {this:Player});
 Player.prototype.getMainhandSlot = procHacker.js("Player::getCarriedItem", ItemStack, {this:Player});
 Player.prototype.getOffhandSlot = procHacker.js("Actor::getOffhandSlot", ItemStack, {this:Player});
+Player.prototype.getPermissionLevel = procHacker.js("Player::getPlayerPermissionLevel", RawTypeId.Int32, {this:Player});
 
 ServerPlayer.abstract({
     networkIdentifier:[NetworkIdentifier, 0x9f0]
@@ -370,6 +287,7 @@ ServerInstance.abstract({
     networkHandler:[NetworkHandler.ref(), 0xa8],
     scriptEngine:[MinecraftServerScriptEngine.ref(), 0x210],
 });
+(ServerInstance.prototype as any)._disconnectAllClients = procHacker.js("ServerInstance::disconnectAllClientsWithMessage", RawTypeId.Void, {this:ServerInstance}, CxxStringWrapper);
 
 // gamemode.ts
 GameMode.define({
@@ -388,7 +306,9 @@ ItemStack.abstract({
 });
 (ItemStack.prototype as any)._getId = procHacker.js("ItemStackBase::getId", RawTypeId.Int32, {this:ItemStack});
 (ItemStack.prototype as any)._getItem = procHacker.js("ItemStackBase::getItem", Item, {this:ItemStack});
+(ItemStack.prototype as any)._getCustomName = procHacker.js("ItemStackBase::getName", CxxStringWrapper, {this:ItemStack, structureReturn:true});
 (ItemStack.prototype as any)._setCustomName = procHacker.js("ItemStackBase::setCustomName", RawTypeId.Void, {this:ItemStack}, CxxStringWrapper);
+ItemStack.prototype.getUserData = procHacker.js("ItemStackBase::getUserData", CompoundTag, {this:ItemStack});
 ItemStack.prototype.hasCustomName = procHacker.js("ItemStackBase::hasCustomHoverName", RawTypeId.Boolean, {this:ItemStack});
 ItemStack.prototype.isBlock = procHacker.js("ItemStackBase::isBlock", RawTypeId.Boolean, {this:ItemStack});
 ItemStack.prototype.isNull = procHacker.js("ItemStackBase::isNull", RawTypeId.Boolean, {this:ItemStack});

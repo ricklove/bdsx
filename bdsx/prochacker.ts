@@ -54,13 +54,13 @@ class AsmMover extends X64Assembler {
             if (offset < 0 || offset > this.codesize) {
                 const tmpreg = this.getUnusing();
                 if (tmpreg === null) throw Error(`Not enough free registers`);
-                const jmp_r = (asm.code as any)[basename+'_r'];
+                const jmp_r = (asm.code as any)[`${basename}_r`];
                 if (jmp_r) {
                     this.mov_r_c(tmpreg, this.origin.add(offset));
                     jmp_r.call(this, tmpreg);
                 } else {
                     const reversed = oper.reverseJump();
-                    (this as any)[reversed+'_label']('!');
+                    (this as any)[`${reversed}_label`]('!');
                     this.jmp64(this.origin.add(offset), tmpreg);
                     this.close_label('!');
                 }
@@ -93,6 +93,9 @@ class AsmMover extends X64Assembler {
     }
 }
 
+/**
+ * Procedure hacker
+ */
 export class ProcHacker<T extends Record<string, NativePointer>> {
     constructor(public readonly map:T) {
     }
@@ -319,8 +322,9 @@ export class ProcHacker<T extends Record<string, NativePointer>> {
     /**
      * get symbols from cache.
      * if symbols don't exist in cache. it reads pdb.
+     * @param undecorate if it's set with UNDNAME_*, it uses undecorated(demangled) symbols
      */
-    static load<KEY extends string, KEYS extends readonly [...KEY[]]>(cacheFilePath:string, names:KEYS):ProcHacker<{[key in KEYS[number]]: NativePointer}> {
-        return new ProcHacker(pdb.getList(cacheFilePath, {}, names));
+    static load<KEY extends string, KEYS extends readonly [...KEY[]]>(cacheFilePath:string, names:KEYS, undecorate?:number):ProcHacker<{[key in KEYS[number]]: NativePointer}> {
+        return new ProcHacker(pdb.getList(cacheFilePath, {}, names, false, undecorate));
     }
 }

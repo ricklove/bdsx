@@ -30,7 +30,7 @@ export class Tester {
             Tester.errored = true;
         }
     }
-    
+
     error(message:string, stackidx:number = 2):void {
         const stack = Error().stack!;
         this._error(message, remapStackLine(getLineAt(stack, stackidx)).stackLine);
@@ -50,9 +50,13 @@ export class Tester {
         if (!cond) this.error(message, 3);
     }
 
+    equals<T>(actual:T, expected:T, message:string='', toString:(v:T)=>string=v=>v+''):void {
+        if (actual !== expected) this.error(`Expected: ${toString(expected)}, Actual: ${toString(actual)}, ${message}`, 3);
+    }
+
     static async test(tests:Record<string, (this:Tester)=>Promise<void>|void>):Promise<void> {
         await new Promise(resolve=>setTimeout(resolve, 100)); // run after examples
-        
+
         // pass one tick, wait until result of the list command example
         {
             const system = server.registerSystem(0, 0);
@@ -63,11 +67,11 @@ export class Tester {
                 };
             });
         }
-    
+
         console.log(`[test] node: ${process.versions.node}`);
-        console.log('[test] engine: '+process.jsEngine+'@'+process.versions[process.jsEngine!]);
-    
-        const testlist = Object.entries(tests);        
+        console.log(`[test] engine: ${process.jsEngine}@${process.versions[process.jsEngine!]}`);
+
+        const testlist = Object.entries(tests);
         testcount += testlist.length;
 
         for (const [subject, test] of testlist) {

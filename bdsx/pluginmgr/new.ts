@@ -12,7 +12,8 @@ if (process.argv[2] === undefined) {
 }
 const targetPath = path.resolve(process.argv[2]);
 if (fs.existsSync(targetPath)) {
-    console.error(colors.red(`[BDSX-Plugins] '${targetPath}' already exists`));
+    console.error(colors.red(`[BDSX-Plugins] '${targetPath}' directory already exists`));
+    console.error(colors.red(`[BDSX-Plugins] Please execute it with the new path`));
     process.exit(0);
 }
 
@@ -49,7 +50,7 @@ bedrockServer.close.on(()=>{
 });
 
 `;
-    fs.writeFileSync(targetdir+'index.ts', exampleSource, 'utf-8');
+    fs.writeFileSync(`${targetdir}index.ts`, exampleSource, 'utf-8');
 }
 
 // package.json
@@ -75,24 +76,25 @@ bedrockServer.close.on(()=>{
             "typescript": "^4.2.3"
         }
     };
-    fs.writeFileSync(targetdir+'package.json', JSON.stringify(examplejson, null, 2).replace(/\n/g, os.EOL), 'utf-8');
+    fs.writeFileSync(`${targetdir}package.json`, JSON.stringify(examplejson, null, 2).replace(/\n/g, os.EOL), 'utf-8');
 }
 
 // tsconfig.json
 {
     const tsconfig = JSON.parse(fs.readFileSync('./tsconfig.json', 'utf-8'));
     delete tsconfig.exclude;
-    fs.writeFileSync(targetdir+'tsconfig.json', JSON.stringify(tsconfig, null, 2).replace(/\n/g, os.EOL), 'utf-8');
+    tsconfig.declaration = true;
+    fs.writeFileSync(`${targetdir}tsconfig.json`, JSON.stringify(tsconfig, null, 2).replace(/\n/g, os.EOL), 'utf-8');
 }
 
 // .npmignore
 {
     const npmignore = `
 /.git
-!*.d.ts
 *.ts
+!*.d.ts
 `;
-    fs.writeFileSync(targetdir+'.npmignore', npmignore, 'utf-8');
+    fs.writeFileSync(`${targetdir}.npmignore`, npmignore, 'utf-8');
 }
 
 // .gitignore
@@ -100,8 +102,9 @@ bedrockServer.close.on(()=>{
     const gitignore = `
 /node_modules
 *.js
+*.d.ts
 `;
-    fs.writeFileSync(targetdir+'.gitignore', gitignore, 'utf-8');
+    fs.writeFileSync(`${targetdir}.gitignore`, gitignore, 'utf-8');
 }
 
 // README.md
@@ -110,7 +113,7 @@ bedrockServer.close.on(()=>{
 # ${basename} Plugin
 The plugin for bdsx
 `;
-    fs.writeFileSync(targetdir+'README.md', readme, 'utf-8');
+    fs.writeFileSync(`${targetdir}README.md`, readme, 'utf-8');
 }
 
 function camelize(context:string):string {
@@ -130,7 +133,7 @@ child_process.execSync('npm i', {stdio:'inherit'});
 
 process.chdir(currentdir);
 let rpath = path.relative(currentdir, targetdir).replace(/\\/g, '/');
-if (!rpath.startsWith('.')) rpath = './'+rpath;
+if (!rpath.startsWith('.')) rpath = `./${rpath}`;
 child_process.execSync(`npm i "${rpath}"`, {stdio:'inherit'});
 
 console.log(`[BDSX-Plugins] Generated at ${targetPath}`);
