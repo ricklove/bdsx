@@ -1,5 +1,4 @@
-import { LanguageParser, ParsingError, TextParser } from "./textparser";
-import { str2set } from "./util";
+import { LanguageParser, ParsingError } from "./textparser";
 
 function unexpected():never {
     throw Error('Unexpected operation');
@@ -379,7 +378,7 @@ export namespace polynominal {
             throw new ParsingError(message, {
                 column: offset + parser.i-word.length,
                 width: word.length,
-                line: lineNumber
+                line: lineNumber,
             });
         }
 
@@ -393,11 +392,11 @@ export namespace polynominal {
             }
 
             const opers = OPERATORS.get(opername);
-            if (opers === undefined) error(`Unexpected operator '${opername}'`, opername);
+            if (opers == null) error(`Unexpected operator '${opername}'`, opername);
 
             for (const type of types) {
                 const oper = opers[type];
-                if (oper !== undefined) return oper;
+                if (oper != null) return oper;
             }
             error(`Unexpected operator '${opername}' for ${types.join(',')}`, opername);
         }
@@ -535,7 +534,6 @@ namespace operation {
     export const binaryExponent = new polynominal.Operator(16, (a,b)=>a**b, (a,b)=>a.exponent(b));
 }
 
-
 interface OperatorSet {
     unaryPrefix?:polynominal.Operator;
     unarySuffix?:polynominal.Operator;
@@ -544,21 +542,21 @@ interface OperatorSet {
 const OPERATORS = new Map<string, OperatorSet>();
 
 OPERATORS.set('**', {
-    binary: operation.binaryExponent
+    binary: operation.binaryExponent,
 });
 
 OPERATORS.set('*', {
-    binary: operation.binaryMultiply
+    binary: operation.binaryMultiply,
 });
 OPERATORS.set('/', { binary: new polynominal.Operator(15, (a,b)=>a/b, (a,b)=>a.multiply(b.exponent(new polynominal.Constant(-1)))) });
 
 OPERATORS.set('+', {
     unaryPrefix: new polynominal.Operator(17, v=>v, v=>v),
-    binary: operation.binaryPlus
+    binary: operation.binaryPlus,
 });
 OPERATORS.set('-', {
     unaryPrefix: new polynominal.Operator(17, v=>-v, v=>v.multiply(new polynominal.Constant(-1))),
-    binary: new polynominal.Operator(14, (a,b)=>a-b, (a,b)=>a.add(b.multiply(new polynominal.Constant(-1))))
+    binary: new polynominal.Operator(14, (a,b)=>a-b, (a,b)=>a.add(b.multiply(new polynominal.Constant(-1)))),
 });
 OPERATORS.set('~', { unaryPrefix: new polynominal.Operator(17, v=>~v) });
 

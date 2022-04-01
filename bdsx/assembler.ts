@@ -1,16 +1,14 @@
+import * as colors from 'colors';
 import { bin } from "./bin";
-import { bin64_t } from "./nativetype";
+import { fsutil } from "./fsutil";
 import { polynominal } from "./polynominal";
 import { remapStack } from "./source-map-support";
 import { ParsingError, ParsingErrorContainer, SourcePosition, TextLineParser } from "./textparser";
-import { getLineAt } from "./util";
+import { checkPowOf2, getLineAt } from "./util";
 import { BufferReader, BufferWriter } from "./writer/bufferstream";
 import { ScriptWriter } from "./writer/scriptwriter";
-import fs = require('fs');
-import colors = require('colors');
 
-export enum Register
-{
+export enum Register {
     absolute=-2,
     rip=-1,
     rax,
@@ -31,8 +29,7 @@ export enum Register
     r15,
 }
 
-export enum FloatRegister
-{
+export enum FloatRegister {
     xmm0,
     xmm1,
     xmm2,
@@ -51,8 +48,7 @@ export enum FloatRegister
     xmm15,
 }
 
-enum MovOper
-{
+enum MovOper {
     Register,
     Const,
     Read,
@@ -72,17 +68,17 @@ enum FloatOper {
 enum FloatOperSize {
     xmmword,
     singlePrecision,
-    doublePrecision
+    doublePrecision,
 }
 
-export enum OperationSize
-{
+export enum OperationSize {
     void,
     byte,
     word,
     dword,
     qword,
-    xmmword
+    mmword,
+    xmmword,
 }
 
 interface TypeSize {
@@ -99,8 +95,7 @@ const sizemap = new Map<string, TypeSize>([
     ['xmmword', {bytes: 16, size: OperationSize.xmmword} ],
 ]);
 
-export enum Operator
-{
+export enum Operator {
     add,
     or,
     adc,
@@ -111,8 +106,7 @@ export enum Operator
     cmp,
 }
 
-export enum JumpOperation
-{
+export enum JumpOperation {
     jo,
     jno,
     jb,
@@ -131,8 +125,7 @@ export enum JumpOperation
     jg,
 }
 
-export interface Value64Castable
-{
+export interface Value64Castable {
     [asm.splitTwo32Bits]():[number, number];
 }
 
@@ -145,6 +138,46 @@ const COMMENT_REGEXP = /[;#]/;
 
 export type Value64 = number|string|Value64Castable;
 export type AsmMultiplyConstant = 1|2|4|8;
+
+const sizeInfo = new Map<OperationSize, {
+    fnname:string,
+    jstype:string,
+    size:number,
+}>();
+sizeInfo.set(OperationSize.byte, {
+    fnname: 'Uint8',
+    jstype: 'number',
+    size: 1,
+});
+sizeInfo.set(OperationSize.word, {
+    fnname: 'Uint16',
+    jstype: 'number',
+    size: 2,
+});
+sizeInfo.set(OperationSize.dword, {
+    fnname: 'Int32',
+    jstype: 'number',
+    size: 4,
+});
+sizeInfo.set(OperationSize.qword, {
+    fnname: 'Pointer',
+    jstype: 'VoidPointer',
+    size: 8,
+});
+function isZero(value:Value64):boolean {
+    switch (typeof value) {
+    case 'string':
+        return bin.isZero(value);
+    case 'object': {
+        const v = value[asm.splitTwo32Bits]();
+        return v[0] === 0 && v[1] === 0;
+    }
+    case 'number':
+        return value === 0;
+    default:
+        throw Error(`invalid constant value: ${value}`);
+    }
+}
 
 function split64bits(value:Value64):[number, number] {
     switch (typeof value) {
@@ -197,7 +230,7 @@ class AsmChunk extends BufferWriter {
     public readonly ids:AddressIdentifier[] = [];
     public readonly unresolved:UnresolvedConstant[] = [];
 
-    constructor(array:Uint8Array, size:number) {
+    constructor(array:Uint8Array, size:number, public align:number) {
         super(array, size);
     }
 
@@ -275,7 +308,7 @@ class AsmChunk extends BufferWriter {
 
 class Identifier {
     constructor(
-        public name:string) {
+        public name:string|null) {
     }
 }
 
@@ -287,24 +320,121 @@ class Constant extends Identifier {
 
 class AddressIdentifier extends Identifier {
     constructor(
-        name:string,
+        name:string|null,
         public chunk:AsmChunk|null,
         public offset:number) {
         super(name);
     }
+
+    sameAddressWith(other:AddressIdentifier):boolean {
+        return this.chunk === other.chunk && this.offset === other.offset;
+    }
 }
 
 class Label extends AddressIdentifier {
-    constructor(name:string) {
+    public UnwindCodes:(UNWIND_CODE|number)[]|null = null;
+    public frameRegisterOffset = 0;
+    public frameRegister:Register = Register.rax;
+    public exceptionHandler:Label|null = null;
+
+    isProc():boolean {
+        return this.UnwindCodes !== null;
+    }
+
+    constructor(name:string|null) {
         super(name, null, 0);
+    }
+
+    setStackFrame(label:Label, r:Register, offset:number):void {
+        if (this.frameRegister !== Register.rax) throw Error(`already set`);
+        if (this.UnwindCodes === null) throw Error(`${this.name} is not proc`);
+        if (offset < 0 || offset > 240) throw TypeError(`offset out of range (offset=${offset}, not in 0~240)`);
+        const qcount = offset>>4;
+        if ((qcount << 4) !== offset) throw TypeError(`is not 16 bytes aligned (offset=${offset})`);
+        this.frameRegisterOffset = qcount;
+        if (r <= Register.rax || r > Register.r15) throw TypeError(`register out of range (register=${r}, not in 1~15)`);
+        this.frameRegister = r;
+        this.UnwindCodes.push(new UNWIND_CODE(label, UWOP_SET_FPREG, 0));
+    }
+
+    allocStack(label:Label, bytes:number):void {
+        if (this.UnwindCodes === null) throw Error(`${this.name} is not proc`);
+        if (bytes <= 0) throw TypeError(`too small (bytes=${bytes})`);
+        const qcount = bytes>>3;
+        if ((qcount << 3) !== bytes) throw TypeError(`is not 8 bytes aligned (bytes=${bytes})`);
+        if (qcount <= 0xf) {
+            this.UnwindCodes.push(new UNWIND_CODE(label, UWOP_ALLOC_SMALL, qcount-1));
+        } else {
+            if (qcount <= 0xffff) {
+                this.UnwindCodes.push(qcount);
+                this.UnwindCodes.push(new UNWIND_CODE(label, UWOP_ALLOC_LARGE, 0));
+            } else {
+                this.UnwindCodes.push(bytes >>> 16);
+                this.UnwindCodes.push(bytes & 0xffff);
+                this.UnwindCodes.push(new UNWIND_CODE(label, UWOP_ALLOC_LARGE, 1));
+            }
+        }
+    }
+
+    pushRegister(label:Label, register:Register):void {
+        if (this.UnwindCodes === null) throw Error(`${this.name} is not proc`);
+        this.UnwindCodes.push(new UNWIND_CODE(label, UWOP_PUSH_NONVOL, register));
+    }
+
+    private _getLastUnwindCode():UNWIND_CODE|null {
+        if (this.UnwindCodes === null) throw Error(`${this.name} is not proc`);
+        for (let i=this.UnwindCodes.length-1;i>=0;i--) {
+            const code = this.UnwindCodes[i];
+            if (typeof code === 'number') continue;
+            return code;
+        }
+        return null;
+    }
+
+    getUnwindInfoSize():number {
+        if (this.UnwindCodes === null) throw Error(`${this.name} is not proc`);
+        const unwindCodeSize = (((this.UnwindCodes.length + 1) & ~1) - 1) * 2;
+        return unwindCodeSize + 8;
+    }
+
+    writeUnwindInfoTo(chunk:AsmChunk, functionBegin:number):void {
+        if (this.UnwindCodes === null) throw Error(`${this.name} is not proc`);
+
+        const flags = this.exceptionHandler !== null ? UNW_FLAG_EHANDLER : UNW_FLAG_NHANDLER;
+        chunk.writeUint8(UNW_VERSION | (flags << 3)); // Version 3 bits, Flags 5 bits
+
+        const last = this._getLastUnwindCode();
+        const SizeOfProlog = last === null ? 0 : last.label.offset - functionBegin;
+        chunk.writeUint8(SizeOfProlog); // SizeOfProlog
+        chunk.writeUint8(this.UnwindCodes.length); // CountOfUnwindCodes
+        if (this.frameRegister === Register.rax) {
+            chunk.writeUint8(0);
+        } else {
+            chunk.writeUint8(this.frameRegister | (this.frameRegisterOffset << 4)); // FrameRegister 4 bits, FrameRegisterOffset 4 bits
+        }
+        for (let i=this.UnwindCodes.length-1;i>=0;i--) {
+            const code = this.UnwindCodes[i];
+            if (typeof code === 'number') {
+                chunk.writeUint16(code);
+            } else {
+                code.writeTo(functionBegin, chunk);
+            }
+        }
+        if ((this.UnwindCodes.length & 1) !== 0) {
+            chunk.writeInt16(0);
+        }
+        // Exception Handler or Chained Unwind Info
+        if (this.exceptionHandler !== null) {
+            chunk.writeInt32(this.exceptionHandler.offset); // ExceptionHandler
+        }
     }
 }
 
 class Defination extends AddressIdentifier {
-
     constructor(name:string,
         chunk:AsmChunk|null,
         offset:number,
+        public arraySize:number|null,
         public size:OperationSize|undefined) {
         super(name, chunk, offset);
     }
@@ -332,42 +462,73 @@ interface TypeInfo {
     size:OperationSize;
     bytes:number;
     align:number;
-    arraySize:number;
+    arraySize:number|null;
 }
 
-const SIZE_MAX_VAL:{[key in OperationSize]?:number|bin64_t}= {
-    [OperationSize.byte]: INT8_MAX,
-    [OperationSize.word]: INT16_MAX,
-    [OperationSize.dword]: INT32_MAX,
-    [OperationSize.qword]: bin.make64(INT32_MAX, -1),
-};
+const MEMORY_INDICATE_CHUNK = new AsmChunk(new Uint8Array(0), 0, 1);
 
-const MEMORY_INDICATE_CHUNK = new AsmChunk(new Uint8Array(0), 0);
+const UNW_VERSION = 0x01;
+const UNW_FLAG_NHANDLER = 0x0;
+const UNW_FLAG_EHANDLER = 0x1; // The function has an exception handler that should be called when looking for functions that need to examine exceptions.
+const UNW_FLAG_UHANDLER = 0x2; // The function has a termination handler that should be called when unwinding an exception.
+const UNW_FLAG_CHAININFO = 0x4;
 
-const PARAM_REG_OFFSETS:(number|null)[] = [
-    null, // rax,
-    -0x00, // rcx,
-    -0x08, // rdx,
-    null, // rbx,
-    null, // rsp,
-    null, // rbp,
-    null, // rsi,
-    null, // rdi,
-    -0x10, // r8,
-    -0x18, // r9,
-];
+const UWOP_PUSH_NONVOL = 0;     /* info == register number */
+const UWOP_ALLOC_LARGE = 1;     /* no info, alloc size in next 2 slots */
+const UWOP_ALLOC_SMALL = 2;     /* info == size of allocation / 8 - 1 */
+const UWOP_SET_FPREG = 3;       /* no info, FP = RSP + UNWIND_INFO.FPRegOffset*16 */
+const UWOP_SAVE_NONVOL = 4;     /* info == register number, offset in next slot */
+const UWOP_SAVE_NONVOL_FAR = 5; /* info == register number, offset in next 2 slots */
+const UWOP_SAVE_XMM128 = 8;     /* info == XMM reg number, offset in next slot */
+const UWOP_SAVE_XMM128_FAR = 9; /* info == XMM reg number, offset in next 2 slots */
+const UWOP_PUSH_MACHFRAME = 10; /* info == 0: no error-code, 1: error-code */
+
+class UNWIND_CODE {
+    constructor(public label:Label, public UnwindOp:number, public OpInfo:number) {
+        if (this.OpInfo < 0) throw TypeError(`Too small (OpInfo=${OpInfo})`);
+        if (this.OpInfo > 0xf) throw TypeError(`Too large (OpInfo=${OpInfo})`);
+        if (this.UnwindOp < 0) throw TypeError(`Too small (UnwindOp=${UnwindOp})`);
+        if (this.UnwindOp > 0xf) throw TypeError(`Too large (UnwindOp=${UnwindOp})`);
+    }
+
+    writeTo(functionBegin:number, buf:AsmChunk):void {
+        buf.writeUint8(this.label.offset - functionBegin); // CodeOffset
+        buf.writeUint8(this.UnwindOp | (this.OpInfo << 4)); // UnwindOp 4 bits, OpInfo 4 bits
+    }
+}
+
+export enum FFOperation {
+    inc,
+    dec,
+    call,
+    call_far,
+    jmp,
+    jmp_far,
+    push,
+}
+
+interface RUNTIME_FUNCTION {
+    BeginAddress:number;
+    EndAddress:number;
+    UnwindData:number;
+}
 
 export class X64Assembler {
 
     private memoryChunkSize = 0;
     private memoryChunkAlign = 1;
+    private codeAlign = 1;
     private constChunk:AsmChunk|null = null;
     private chunk:AsmChunk;
-    private sehUnwindCount = 0;
-    private sehFuncCount = 0;
     private readonly ids = new Map<string, Identifier>();
     private readonly scopeStack:Set<string>[] = [];
     private scope = new Set<string>();
+    private currentProc:Label|null = null;
+    private readonly headProc:Label;
+    private unwinded = false;
+    private normalized = false;
+
+    private prologueAnchor:Label|null = null;
 
     private pos:SourcePosition|null = null;
 
@@ -387,7 +548,7 @@ export class X64Assembler {
             throw new ParsingError(message, {
                 column: offset + column,
                 width: width,
-                line: lineNumber
+                line: lineNumber,
             });
         }
 
@@ -418,9 +579,9 @@ export class X64Assembler {
                 if (term.constant !== 1) {
                     if (mult !== 1) error('too many multiplying.');
                     mult = term.constant;
-                    regs.unshift(reg);
+                    regs.unshift(reg as Register);
                 } else {
-                    regs.push(reg);
+                    regs.push(reg as Register);
                 }
 
             } else {
@@ -439,12 +600,56 @@ export class X64Assembler {
             r1: regs[0],
             r2: regs[1],
             multiply: mult,
-            offset: poly.constant
+            offset: poly.constant,
         };
     }
 
-    constructor(buffer:Uint8Array, size:number) {
-        this.chunk = new AsmChunk(buffer, size);
+    constructor(buffer:Uint8Array, size:number, align:number = 1) {
+        this.chunk = new AsmChunk(buffer, size, align);
+        this.currentProc = this.headProc = this.makeLabel('#head', false, true);
+        this.scopeStack.push(this.scope);
+        this.scope = new Set;
+        this.prologueAnchor = this.makeLabel(null);
+    }
+
+    private _checkPrologue():Label {
+        if (this.currentProc === null) {
+            throw Error(`not in proc`);
+        }
+        if (this.prologueAnchor === null || this.prologueAnchor.chunk !== this.chunk || this.prologueAnchor.offset !== this.chunk.size) {
+            throw Error(`not in prologue`);
+        }
+        return this.currentProc;
+    }
+
+    /**
+     * push with unwind info
+     */
+    keep_r(register:Register):this {
+        const proc = this._checkPrologue();
+        this.push_r(register);
+        this.prologueAnchor = this.makeLabel(null);
+        proc.pushRegister(this.prologueAnchor, register);
+        return this;
+    }
+
+    /**
+     * push with unwind info
+     */
+    stack_c(size:number):this {
+        const proc = this._checkPrologue();
+        this.sub_r_c(Register.rsp, size);
+        this.prologueAnchor = this.makeLabel(null);
+        proc.allocStack(this.prologueAnchor, size);
+        return this;
+    }
+
+    setframe_r_c(r:Register, offset:number):this {
+        const proc = this._checkPrologue();
+        this.lea_r_rp(r, Register.rsp, 1, offset);
+        this.prologueAnchor = this.makeLabel(null);
+        proc.setStackFrame(this.prologueAnchor, r, offset);
+        return this;
     }
 
     getDefAreaSize():number {
@@ -456,10 +661,10 @@ export class X64Assembler {
     }
 
     setDefArea(size:number, align:number):void {
+        checkPowOf2(align);
         this.memoryChunkSize = size;
         this.memoryChunkAlign = align;
-        const alignbit = Math.log2(align);
-        if ((alignbit|0) !== alignbit) throw Error(`Invalid alignment ${align}`);
+        if (align > this.codeAlign) this.codeAlign = align;
     }
 
     connect(cb:(asm:X64Assembler)=>this):this {
@@ -481,24 +686,33 @@ export class X64Assembler {
         return this;
     }
 
+    writeUint8(value:number):this {
+        this.chunk.writeUint8(value);
+        return this;
+    }
+
     writeInt16(value:number):this {
-        return this.write(
-            value&0xff,
-            (value>>>8)&0xff);
+        this.chunk.writeInt16(value);
+        return this;
     }
 
     writeInt32(value:number):this {
-        return this.write(
-            value&0xff,
-            (value>>>8)&0xff,
-            (value>>>16)&0xff,
-            (value>>>24));
+        this.chunk.writeInt32(value);
+        return this;
     }
 
-    labels():Record<string, number> {
-        this._normalize();
-        const labels:Record<string, number> = {};
+    getLabelOffset(name:string):number {
+        if (!this.normalized) throw Error(`asm is not built, need to call build()`);
+        const label = this.ids.get(name);
+        if (!(label instanceof AddressIdentifier)) return -1;
+        return label.offset;
+    }
+
+    labels(skipPrivate?:boolean):Record<string, number> {
+        if (!this.normalized) throw Error(`asm is not built, need to call build()`);
+        const labels:Record<string, number> = Object.create(null);
         for (const [name, label] of this.ids) {
+            if (skipPrivate && name.startsWith('#')) continue;
             if (label instanceof Label) {
                 labels[name] = label.offset;
             }
@@ -507,8 +721,8 @@ export class X64Assembler {
     }
 
     defs():Record<string, number> {
-        this._normalize();
-        const labels:Record<string, number> = {};
+        if (!this.normalized) throw Error(`asm is not built, need to call build()`);
+        const labels:Record<string, number> = Object.create(null);
         for (const [name, label] of this.ids) {
             if (label instanceof Defination) {
                 labels[name] = label.offset;
@@ -517,24 +731,27 @@ export class X64Assembler {
         return labels;
     }
 
-    exports():Record<string, number> {
-        this._normalize();
-        const labels:Record<string, number> = {};
-        for (const [name, label] of this.ids) {
-            if (label instanceof Defination) {
-                labels[name] = label.offset;
-            }
-        }
-        return labels;
-    }
-
-    buffer():Uint8Array {
-        this._normalize();
+    buffer(makeRuntimeFunctionTable:boolean = false):Uint8Array {
+        this._normalize(makeRuntimeFunctionTable);
         return this.chunk.buffer();
     }
 
     ret(): this {
         return this.put(0xc3);
+    }
+
+    ret_c(n:number):this {
+        this.put(0xc2);
+        return this.writeInt16(n);
+    }
+
+    retf(): this {
+        return this.put(0xcb);
+    }
+
+    retf_c(n:number):this {
+        this.put(0xca);
+        return this.writeInt16(n);
     }
 
     nop(): this {
@@ -552,6 +769,16 @@ export class X64Assembler {
     int_c(n:number):this {
         if (n === 3) return this.int3();
         return this.write(0xcd, n & 0xff);
+    }
+
+    cbw():this {
+        return this.write(0x66, 0x98);
+    }
+    cwde():this {
+        return this.write(0x98);
+    }
+    cdqe():this {
+        return this.write(0x48, 0x98);
     }
 
     gs():this {
@@ -614,23 +841,38 @@ export class X64Assembler {
         } else {
             opcode |= 0x80;
         }
+
         if (r3 !== null) {
-            if (r1 === Register.rsp) {
-                throw Error(`Invalid operation r1=rsp, r3=${Register[r3]}`);
-            }
-            switch (multiplying) {
-            case 1: break;
-            case 2: opcode |= 0x40; break;
-            case 4: opcode |= 0x80; break;
-            case 8: opcode |= 0xc0; break;
-            default: throw Error(`Invalid multiplying ${multiplying}`);
+            if (r3 === Register.rsp) {
+                throw Error(`Invalid operation r3=rsp, r1=${Register[r1]}`);
             }
             this.put(opcode | 0x04);
-            opcode |= (r3 & 7) << 3;
-        }
-        this.put((r1 & 7) | opcode);
-        if (targetRegister === Register.rsp) {
-            this.put(0x24);
+            let second = (r1 & 7) | (r3 & 7) << 3;
+            switch (multiplying) {
+            case 1: break;
+            case 2: second |= 0x40; break;
+            case 4: second |= 0x80; break;
+            case 8: second |= 0xc0; break;
+            default: throw Error(`Invalid multiplying ${multiplying}`);
+            }
+            this.put(second);
+        } else {
+            if (multiplying !== 1) {
+                this.put(opcode | 0x04);
+                let second = ((r1 & 7) << 3) | 0x05;
+                switch (multiplying) {
+                case 2: second |= 0x40; break;
+                case 4: second |= 0x80; break;
+                case 8: second |= 0xc0; break;
+                default: throw Error(`Invalid multiplying ${multiplying}`);
+                }
+                this.put(second);
+            } else {
+                this.put((r1 & 7) | opcode);
+                if (targetRegister === Register.rsp) {
+                    this.put(0x24);
+                }
+            }
         }
 
         if (opcode & 0x40) this.put(offset);
@@ -719,27 +961,41 @@ export class X64Assembler {
         return this;
     }
 
-    private _jmp(isCall:boolean, r:Register, multiply:AsmMultiplyConstant, offset:number, oper:MovOper):this {
-        if (r >= Register.r8) this.put(0x41);
-        this.put(0xff);
-        this._target(isCall ? 0x10 : 0x20, r, null, null, r, multiply, offset, oper);
-        return this;
-    }
-
-    private _jmp_r(isCall:boolean, r:Register):this {
-        return this._jmp(isCall, r, 1, 0, MovOper.Register);
-    }
-
     movabs_r_c(
         dest:Register, value:Value64, size:OperationSize = OperationSize.qword):this {
         if (size !== OperationSize.qword) throw Error(`Invalid operation size ${OperationSize[size]}`);
         return this.mov_r_c(dest, value, size);
     }
 
-    def(name:string, size:OperationSize, bytes:number, align:number, exportDef:boolean = false):this {
+    private _movabs_rax_mem(address:Value64, writeBit:number, size:OperationSize):this {
+        if (size === OperationSize.word) {
+            this.write(0x66);
+        } else if (size === OperationSize.qword) {
+            this.write(0x48);
+        }
+        const dwordBit = +(size !== OperationSize.byte);
+        this.write((writeBit << 1) | dwordBit | 0xa0);
+        const [low32, high32] = split64bits(address);
+        this.writeInt32(low32);
+        this.writeInt32(high32);
+        return this;
+    }
+
+    movabs_r_cp(
+        dest:Register, address:Value64, size:OperationSize = OperationSize.qword):this {
+        if (dest !== Register.rax) throw Error(`Invalid operand ${Register[dest]}`);
+        return this._movabs_rax_mem(address, 0, size);
+    }
+
+    movabs_cp_r(
+        address:Value64, src:Register, size:OperationSize = OperationSize.qword):this {
+        if (src !== Register.rax) throw Error(`Invalid operand ${Register[src]}`);
+        return this._movabs_rax_mem(address, 1, size);
+    }
+
+    def(name:string, size:OperationSize, bytes:number, align:number, arraySize:number|null = null, exportDef:boolean = false):this {
         if (align < 1) align = 1;
-        const alignbit = Math.log2(align);
-        if ((alignbit|0) !== alignbit) throw Error(`Invalid alignment ${align}`);
+        checkPowOf2(align);
         if (align > this.memoryChunkAlign) {
             this.memoryChunkAlign = align;
         }
@@ -749,7 +1005,7 @@ export class X64Assembler {
         this.memoryChunkSize = offset + bytes;
         if (name === '') return this;
         if (this.ids.has(name)) throw Error(`${name} is already defined`);
-        this.ids.set(name, new Defination(name, MEMORY_INDICATE_CHUNK, offset, size));
+        this.ids.set(name, new Defination(name, MEMORY_INDICATE_CHUNK, offset, arraySize, size));
         if (!exportDef) this.scope.add(name);
         return this;
     }
@@ -783,7 +1039,7 @@ export class X64Assembler {
     mov_r_c(dest:Register, value:Value64, size = OperationSize.qword):this {
         if (size === OperationSize.qword || size === OperationSize.dword) {
             const [low, high] = split64bits(value);
-            if (low === 0 && high === 0) return this.xor_r_r(dest, dest, OperationSize.dword);
+            if (low === 0 && high === 0) return this.xor_r_r(dest, dest);
         }
         return this._mov(dest, 0, null, 1, 0, value, MovOper.Const, size);
     }
@@ -802,11 +1058,19 @@ export class X64Assembler {
         return this._mov(dest, src, null, multiply, offset, 0, MovOper.Write, size);
     }
 
+    mov_rrp_r(dest1:Register, dest2:Register, multiply:AsmMultiplyConstant, offset:number, src:Register, size = OperationSize.qword):this {
+        return this._mov(dest1, src, dest2, multiply, offset, 0, MovOper.Write, size);
+    }
+
     /**
      * move register pointer to register
      */
     mov_r_rp(dest:Register, src:Register, multiply:AsmMultiplyConstant, offset:number, size = OperationSize.qword):this {
         return this._mov(src, dest, null, multiply, offset, 0, MovOper.Read, size);
+    }
+
+    mov_r_rrp(dest:Register, src1:Register, src2:Register, multiply:AsmMultiplyConstant, offset:number, size = OperationSize.qword):this {
+        return this._mov(src1, dest, src2, multiply, offset, 0, MovOper.Read, size);
     }
 
     private _imul(r1:Register, r2:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize, oper:MovOper):this {
@@ -838,35 +1102,75 @@ export class X64Assembler {
      * jump with register
      */
     jmp_r(register:Register):this {
-        return this._jmp_r(false, register);
+        return this._ffoper_r(FFOperation.jmp, register, OperationSize.dword);
+    }
+
+    private _ffoper(ffoper:FFOperation, r:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize, oper:MovOper):this {
+        if (r >= Register.r8) this.put(0x41);
+        this._rex(r, null, null, size);
+        this.put(0xff);
+        this._target(ffoper << 3, r, null, null, r, multiply, offset, oper);
+        return this;
+    }
+    private _ffoper_r(ffoper:FFOperation, r:Register, size:OperationSize):this {
+        return this._ffoper(ffoper, r, 1, 0, size, MovOper.Register);
+    }
+
+    inc_r(r:Register, size:OperationSize = OperationSize.qword):this {
+        return this._ffoper_r(FFOperation.inc, r, size);
+    }
+    inc_rp(r:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this {
+        return this._ffoper(FFOperation.inc, r, multiply, offset, size, MovOper.Write);
+    }
+    dec_r(r:Register, size:OperationSize = OperationSize.qword):this {
+        return this._ffoper_r(FFOperation.dec, r, size);
+    }
+    dec_rp(r:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this {
+        return this._ffoper(FFOperation.dec, r, multiply, offset, size, MovOper.Write);
     }
 
     /**
      * call with register
      */
     call_r(register:Register):this {
-        return this._jmp_r(true, register);
+        return this._ffoper_r(FFOperation.call, register, OperationSize.dword);
     }
 
     /**
      * jump with register pointer
      */
     jmp_rp(register:Register, multiply:AsmMultiplyConstant, offset:number):this {
-        return this._jmp(false, register, multiply, offset, MovOper.Read);
+        return this._ffoper(FFOperation.jmp, register, multiply, offset, OperationSize.dword, MovOper.Read);
     }
 
     /**
      * call with register pointer
      */
     call_rp(register:Register, multiply:AsmMultiplyConstant, offset:number):this {
-        return this._jmp(true, register, multiply, offset, MovOper.Read);
+        return this._ffoper(FFOperation.call, register, multiply, offset, OperationSize.dword, MovOper.Read);
     }
 
     /**
-     * mov tmpreg, 64bits
-     * call tmpreg
+     * jump far pointer
+     */
+    jmp_fp(register:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._ffoper(FFOperation.jmp_far, register, multiply, offset, OperationSize.dword, MovOper.Read);
+    }
+
+    /**
+     * call far pointer
+     */
+    call_fp(register:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._ffoper(FFOperation.call_far, register, multiply, offset, OperationSize.dword, MovOper.Read);
+    }
+
+    /**
+     * just combine of 'mov' and 'call'.
+     * mov tmpreg, value;
+     * call tmpreg;
      */
     call64(value:Value64, tempRegister:Register):this {
+        if (isZero(value)) throw Error(`Invalid jmp destination: ${value}`);
         this.mov_r_c(tempRegister, value);
         this.call_r(tempRegister);
         return this;
@@ -877,39 +1181,31 @@ export class X64Assembler {
         keepRegister:Register[],
         keepFloatRegister:FloatRegister[]):this {
 
-        const fullsize = keepRegister.length * 8;
-        for (const r of keepRegister) {
-            const off = PARAM_REG_OFFSETS[r];
-            if (off == null) throw Error(`${Register[r]} is not the register of arguments`);
-            this.mov_rp_r(Register.rsp, 1, off+fullsize, r);
-        }
-        if (keepFloatRegister.length !== 0) {
-            this.sub_r_c(Register.rsp, 0x18);
-            for (let i=0;i<keepFloatRegister.length;i++) {
-                if (i !== 0) this.sub_r_c(Register.rsp, 0x10);
-                this.movdqa_rp_f(Register.rsp, 1, 0, keepFloatRegister[i]);
-            }
+        const fullsize = keepRegister.length * 8 + keepFloatRegister.length * 0x10;
+        const stackSize = ((0x20 + fullsize -8 + 0xf) & ~0xf) + 8;
+        this.stack_c(stackSize);
 
-            this
-            .sub_r_c(Register.rsp, 0x30)
-            .call64(target, Register.rax)
-            .add_r_c(Register.rsp, 0x30);
-
-            for (let i=keepFloatRegister.length-1;i>=0;i--) {
-                this.movdqa_f_rp(keepFloatRegister[i], Register.rsp, 1, 0);
-                if (i !== 0) this.add_r_c(Register.rsp, 0x10);
-            }
-            this.sub_r_c(Register.rsp, 0x18);
-        } else {
-            this
-            .sub_r_c(Register.rsp, 0x28)
-            .call64(target, Register.rax)
-            .add_r_c(Register.rsp, 0x28);
+        let offset = 0x20;
+        for (const r of keepFloatRegister) {
+            this.movdqa_rp_f(Register.rsp, 1, offset, r);
+            offset += 0x10;
         }
         for (const r of keepRegister) {
-            const off = PARAM_REG_OFFSETS[r]!;
-            this.mov_r_rp(r, Register.rsp, 1, off+fullsize);
+            this.mov_rp_r(Register.rsp, 1, offset, r);
+            offset += 0x8;
         }
+        this.call64(target, Register.rax);
+
+        offset = 0x20;
+        for (const r of keepFloatRegister) {
+            this.movdqa_f_rp(r, Register.rsp, 1, offset);
+            offset += 0x10;
+        }
+        for (const r of keepRegister) {
+            this.mov_r_rp(r, Register.rsp, 1, offset);
+            offset += 0x8;
+        }
+        this.unwind();
         return this;
     }
 
@@ -918,6 +1214,7 @@ export class X64Assembler {
      * jmp tmpreg
      */
     jmp64(value:Value64, tempRegister:Register):this {
+        if (isZero(value)) throw Error(`Invalid jmp destination: ${value}`);
         this.mov_r_c(tempRegister, value);
         this.jmp_r(tempRegister);
         return this;
@@ -929,6 +1226,7 @@ export class X64Assembler {
      * jmp [rsp-8]
      */
     jmp64_notemp(value:Value64):this {
+        if (isZero(value)) throw Error(`Invalid jmp destination: ${value}`);
         const [low32, high32] = split64bits(value);
         this.mov_rp_c(Register.rsp, 1, -8, low32, OperationSize.dword);
         this.mov_rp_c(Register.rsp, 1, -4, high32, OperationSize.dword);
@@ -937,6 +1235,7 @@ export class X64Assembler {
     }
 
     jmp_c(offset:number):this {
+        if (offset === 0) return this;
         if (INT8_MIN <= offset && offset <= INT8_MAX) {
             return this.write(0xeb, offset);
         } else {
@@ -966,11 +1265,11 @@ export class X64Assembler {
         return this._movaps(src, dest, MovOper.Register, 1, 0);
     }
 
-    movaps_f_rp(dest:FloatRegister, src:FloatRegister, multiply:AsmMultiplyConstant, offset:number):this {
+    movaps_f_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number):this {
         return this._movaps(src, dest, MovOper.Read, multiply, offset);
     }
 
-    movaps_rp_f(dest:FloatRegister, src:FloatRegister, multiply:AsmMultiplyConstant, offset:number):this {
+    movaps_rp_f(dest:Register, multiply:AsmMultiplyConstant, offset:number, src:FloatRegister):this {
         return this._movaps(dest, src, MovOper.Write, multiply, offset);
     }
 
@@ -1062,10 +1361,120 @@ export class X64Assembler {
     cmovle_r_rp(dest:Register, src:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this { return this._cmov_o(JumpOperation.jle, src, dest, null, multiply, offset, MovOper.Read, size); }
     cmovg_r_rp(dest:Register, src:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this { return this._cmov_o(JumpOperation.jg, src, dest, null, multiply, offset, MovOper.Read, size); }
 
+    private _set_o(jmpoper:JumpOperation, r1:Register, r3:Register|null, multiply:AsmMultiplyConstant, offset:number, oper:MovOper):this {
+        this.put(0x0f);
+        this.put(0x90 | jmpoper);
+        this._target(0, r1, null, r3, r1, multiply, offset, oper);
+        return this;
+    }
+
+    seto_r(r:Register):this {
+        return this._set_o(JumpOperation.jo, r, null, 1, 0, MovOper.Register);
+    }
+    setno_r(r:Register):this {
+        return this._set_o(JumpOperation.jno, r, null, 1, 0, MovOper.Register);
+    }
+    setb_r(r:Register):this {
+        return this._set_o(JumpOperation.jb, r, null, 1, 0, MovOper.Register);
+    }
+    setae_r(r:Register):this {
+        return this._set_o(JumpOperation.jae, r, null, 1, 0, MovOper.Register);
+    }
+    sete_r(r:Register):this {
+        return this._set_o(JumpOperation.je, r, null, 1, 0, MovOper.Register);
+    }
+    setne_r(r:Register):this {
+        return this._set_o(JumpOperation.jne, r, null, 1, 0, MovOper.Register);
+    }
+    setbe_r(r:Register):this {
+        return this._set_o(JumpOperation.jbe, r, null, 1, 0, MovOper.Register);
+    }
+    seta_r(r:Register):this {
+        return this._set_o(JumpOperation.ja, r, null, 1, 0, MovOper.Register);
+    }
+    sets_r(r:Register):this {
+        return this._set_o(JumpOperation.js, r, null, 1, 0, MovOper.Register);
+    }
+    setns_r(r:Register):this {
+        return this._set_o(JumpOperation.jns, r, null, 1, 0, MovOper.Register);
+    }
+    setp_r(r:Register):this {
+        return this._set_o(JumpOperation.jp, r, null, 1, 0, MovOper.Register);
+    }
+    setnp_r(r:Register):this {
+        return this._set_o(JumpOperation.jnp, r, null, 1, 0, MovOper.Register);
+    }
+    setl_r(r:Register):this {
+        return this._set_o(JumpOperation.jl, r, null, 1, 0, MovOper.Register);
+    }
+    setge_r(r:Register):this {
+        return this._set_o(JumpOperation.jge, r, null, 1, 0, MovOper.Register);
+    }
+    setle_r(r:Register):this {
+        return this._set_o(JumpOperation.jle, r, null, 1, 0, MovOper.Register);
+    }
+    setg_r(r:Register):this {
+        return this._set_o(JumpOperation.jg, r, null, 1, 0, MovOper.Register);
+    }
+
+    seto_rp(r:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._set_o(JumpOperation.jo, r, null, multiply, offset, MovOper.Read);
+    }
+    setno_rp(r:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._set_o(JumpOperation.jno, r, null, multiply, offset, MovOper.Read);
+    }
+    setb_rp(r:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._set_o(JumpOperation.jb, r, null, multiply, offset, MovOper.Read);
+    }
+    setae_rp(r:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._set_o(JumpOperation.jae, r, null, multiply, offset, MovOper.Read);
+    }
+    sete_rp(r:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._set_o(JumpOperation.je, r, null, multiply, offset, MovOper.Read);
+    }
+    setne_rp(r:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._set_o(JumpOperation.jne, r, null, multiply, offset, MovOper.Read);
+    }
+    setbe_rp(r:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._set_o(JumpOperation.jbe, r, null, multiply, offset, MovOper.Read);
+    }
+    seta_rp(r:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._set_o(JumpOperation.ja, r, null, multiply, offset, MovOper.Read);
+    }
+    sets_rp(r:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._set_o(JumpOperation.js, r, null, multiply, offset, MovOper.Read);
+    }
+    setns_rp(r:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._set_o(JumpOperation.jns, r, null, multiply, offset, MovOper.Read);
+    }
+    setp_rp(r:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._set_o(JumpOperation.jp, r, null, multiply, offset, MovOper.Read);
+    }
+    setnp_rp(r:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._set_o(JumpOperation.jnp, r, null, multiply, offset, MovOper.Read);
+    }
+    setl_rp(r:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._set_o(JumpOperation.jl, r, null, multiply, offset, MovOper.Read);
+    }
+    setge_rp(r:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._set_o(JumpOperation.jge, r, null, multiply, offset, MovOper.Read);
+    }
+    setle_rp(r:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._set_o(JumpOperation.jle, r, null, multiply, offset, MovOper.Read);
+    }
+    setg_rp(r:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._set_o(JumpOperation.jg, r, null, multiply, offset, MovOper.Read);
+    }
+
     /**
      * push register
      */
-    push_r(register:Register):this {
+    push_r(register:Register, size:OperationSize = OperationSize.qword):this {
+        if (size === OperationSize.word) {
+            this.put(0x66);
+        } else {
+            if (size !== OperationSize.qword) throw Error(`Operand size mismatch for push: ${OperationSize[size]}`);
+        }
         if (register >= Register.r8) this.put(0x41);
         this.put(0x50 | (register & 7));
         return this;
@@ -1090,7 +1499,12 @@ export class X64Assembler {
         this._target(0x30, r, null, null, r, multiply, offset, MovOper.Write);
         return this;
     }
-    pop_r(r:Register):this {
+    pop_r(r:Register, size:OperationSize = OperationSize.qword):this {
+        if (size === OperationSize.word) {
+            this.put(0x66);
+        } else {
+            if (size !== OperationSize.qword) throw Error(`Operand size mismatch for push: ${OperationSize[size]}`);
+        }
         if (r >= Register.r8) this.put(0x41);
         this.put(0x58 | (r&7));
         return this;
@@ -1127,13 +1541,15 @@ export class X64Assembler {
         return this._xchg(r1, r2, multiply, offset, size, MovOper.Read);
     }
 
-
     private _oper(movoper:MovOper, oper:Operator, r1:Register, r2:Register|null, multiply:AsmMultiplyConstant, offset:number, chr:number, size:OperationSize):this {
-        if (chr !== (chr|0)) throw Error('need 32bits integer');
+        if (chr !== (chr|0) && (chr>>>0) !== chr) {
+            throw Error('need 32bits integer');
+        }
 
         this._rex(r1, r2, null, size);
 
         let lowflag = size === OperationSize.byte ? 0 : 1;
+        if (movoper === MovOper.Read) lowflag |= 0x02;
         if (movoper === MovOper.WriteConst || movoper === MovOper.Const) {
             const is8bits = (INT8_MIN <= chr && chr <= INT8_MAX);
             if (!is8bits && size === OperationSize.byte) throw Error('need 8bits integer');
@@ -1172,6 +1588,7 @@ export class X64Assembler {
         return this._oper(MovOper.Register, Operator.adc, dest, src, 1, 0, 0, size);
     }
     xor_r_r(dest:Register, src:Register, size:OperationSize = OperationSize.qword):this {
+        if (dest === src && size === OperationSize.qword) size = OperationSize.dword;
         return this._oper(MovOper.Register, Operator.xor, dest, src, 1, 0, 0, size);
     }
     or_r_r(dest:Register, src:Register, size:OperationSize = OperationSize.qword):this {
@@ -1281,19 +1698,36 @@ export class X64Assembler {
         return this._oper(MovOper.Write, Operator.and, dest, src, multiply, offset, 0, size);
     }
 
-    shr_r_c(dest:Register, chr:number, size = OperationSize.qword):this {
+    private _shift_r_c(dest:Register, signed:boolean, right:boolean, chr:number, size = OperationSize.qword):this {
         this._rex(dest, 0, null, size);
-        this.put(0xc1);
-        this.put(0xe8 | dest);
-        this.put(chr%128);
+        let operbit = 0xe0;
+        if (right) {
+            operbit |= 0x08;
+            if (signed) operbit |= 0x10;
+        }
+
+        if (chr === 1) {
+            this.put(0xd1);
+            this.put(operbit | dest);
+        } else {
+            this.put(0xc1);
+            this.put(operbit | dest);
+            this.put(chr%128);
+        }
         return this;
     }
+
+    shr_r_c(dest:Register, chr:number, size = OperationSize.qword):this {
+        return this._shift_r_c(dest, false, true, chr, size);
+    }
     shl_r_c(dest:Register, chr:number, size = OperationSize.qword):this {
-        this._rex(dest, 0, null, size);
-        this.put(0xc1);
-        this.put(0xe0 | dest);
-        this.put(chr%128);
-        return this;
+        return this._shift_r_c(dest, false, false, chr, size);
+    }
+    sar_r_c(dest:Register, chr:number, size = OperationSize.qword):this {
+        return this._shift_r_c(dest, true, true, chr, size);
+    }
+    sal_r_c(dest:Register, chr:number, size = OperationSize.qword):this {
+        return this._shift_r_c(dest, true, false, chr, size);
     }
 
     private _movsx(dest:Register, src:Register, multiply:AsmMultiplyConstant, offset:number, destsize:OperationSize, srcsize:OperationSize, oper:MovOper):this {
@@ -1372,93 +1806,186 @@ export class X64Assembler {
         return this._target(0, r1, r2, r3, r1, multiply, offset, oper);
     }
 
-    movups_rp_r(dest:FloatRegister, multiply:AsmMultiplyConstant, offset:number, src:FloatRegister):this {
-        return this._movsf(dest, src, null, multiply, offset, FloatOperSize.xmmword, MovOper.Register, FloatOper.None, OperationSize.dword);
+    movups_rp_f(dest:FloatRegister, multiply:AsmMultiplyConstant, offset:number, src:FloatRegister):this {
+        return this._movsf(dest, src, null, multiply, offset, FloatOperSize.xmmword, MovOper.Write, FloatOper.None, OperationSize.dword);
     }
-    movups_r_rp(dest:FloatRegister, src:FloatRegister, multiply:AsmMultiplyConstant, offset:number):this {
-        return this._movsf(src, dest, null, multiply, offset, FloatOperSize.xmmword, MovOper.Register, FloatOper.None, OperationSize.dword);
+    movups_f_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._movsf(src, dest, null, multiply, offset, FloatOperSize.xmmword, MovOper.Read, FloatOper.None, OperationSize.dword);
     }
-    movups_r_r(dest:FloatRegister, src:FloatRegister):this {
+    movups_f_f(dest:FloatRegister, src:FloatRegister):this {
         return this._movsf(src, dest, null, 1, 0, FloatOperSize.xmmword, MovOper.Register, FloatOper.None, OperationSize.dword);
     }
 
-    movsd_rp_r(dest:Register, multiply:AsmMultiplyConstant, offset:number, src:FloatRegister):this {
+    movsd_rp_f(dest:Register, multiply:AsmMultiplyConstant, offset:number, src:FloatRegister):this {
         return this._movsf(dest, src, null, multiply, offset, FloatOperSize.doublePrecision, MovOper.Write, FloatOper.None, OperationSize.dword);
     }
-    movsd_r_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number):this {
+    movsd_f_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number):this {
         return this._movsf(src, dest, null, multiply, offset, FloatOperSize.doublePrecision, MovOper.Read, FloatOper.None, OperationSize.dword);
     }
-    movsd_r_r(dest:FloatRegister, src:FloatRegister):this {
+    movsd_f_f(dest:FloatRegister, src:FloatRegister):this {
         return this._movsf(src, dest, null, 1, 0, FloatOperSize.doublePrecision, MovOper.Register, FloatOper.None, OperationSize.dword);
     }
 
-    movss_rp_r(dest:Register, multiply:AsmMultiplyConstant, offset:number, src:FloatRegister):this {
+    movss_rp_f(dest:Register, multiply:AsmMultiplyConstant, offset:number, src:FloatRegister):this {
         return this._movsf(dest, src, null, multiply, offset, FloatOperSize.singlePrecision, MovOper.Write, FloatOper.None, OperationSize.dword);
     }
-    movss_r_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number):this {
+    movss_f_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number):this {
         return this._movsf(src, dest, null, multiply, offset, FloatOperSize.singlePrecision, MovOper.Read, FloatOper.None, OperationSize.dword);
     }
-    movss_r_r(dest:FloatRegister, src:FloatRegister):this {
+    movss_f_f(dest:FloatRegister, src:FloatRegister):this {
         return this._movsf(src, dest, null, 1, 0, FloatOperSize.singlePrecision, MovOper.Register, FloatOper.None, OperationSize.dword);
     }
 
-    cvtsi2sd_r_r(dest:FloatRegister, src:Register, size:OperationSize = OperationSize.qword):this {
+    cvtsi2sd_f_r(dest:FloatRegister, src:Register, size:OperationSize = OperationSize.qword):this {
         return this._movsf(src, dest, null, 1, 0, FloatOperSize.doublePrecision, MovOper.Register, FloatOper.Convert_i2f, size);
     }
-    cvtsi2sd_r_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this {
+    cvtsi2sd_f_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this {
         return this._movsf(src, dest, null, multiply, offset, FloatOperSize.doublePrecision, MovOper.Read, FloatOper.Convert_i2f, size);
     }
-    cvttsd2si_r_r(dest:Register, src:FloatRegister, size:OperationSize = OperationSize.qword):this {
+    cvtpi2ps_f_r(dest:FloatRegister, src:Register, size:OperationSize = OperationSize.qword):this {
+        return this._movsf(src, dest, null, 1, 0, FloatOperSize.xmmword, MovOper.Register, FloatOper.Convert_i2f, size);
+    }
+    cvtpi2ps_f_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this {
+        return this._movsf(src, dest, null, multiply, offset, FloatOperSize.xmmword, MovOper.Read, FloatOper.Convert_i2f, size);
+    }
+    cvtpi2pd_f_r(dest:FloatRegister, src:Register, size:OperationSize = OperationSize.qword):this {
+        this.write(0x66);
+        return this._movsf(src, dest, null, 1, 0, FloatOperSize.xmmword, MovOper.Register, FloatOper.Convert_i2f, size);
+    }
+    cvtpi2pd_f_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this {
+        this.write(0x66);
+        return this._movsf(src, dest, null, multiply, offset, FloatOperSize.xmmword, MovOper.Read, FloatOper.Convert_i2f, size);
+    }
+    cvtsd2si_r_f(dest:Register, src:FloatRegister, size:OperationSize = OperationSize.qword):this {
+        return this._movsf(src, dest, null, 1, 0, FloatOperSize.doublePrecision, MovOper.Register, FloatOper.Convert_f2i, size);
+    }
+    cvtsd2si_r_rp(dest:Register, src:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this {
+        return this._movsf(src, dest, null, multiply, offset, FloatOperSize.doublePrecision, MovOper.Read, FloatOper.Convert_f2i, size);
+    }
+    cvtpd2pi_r_f(dest:Register, src:FloatRegister, size:OperationSize = OperationSize.qword):this {
+        this.write(0x66);
+        return this._movsf(src, dest, null, 1, 0, FloatOperSize.xmmword, MovOper.Register, FloatOper.Convert_f2i, size);
+    }
+    cvtpd2pi_r_rp(dest:Register, src:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this {
+        this.write(0x66);
+        return this._movsf(src, dest, null, multiply, offset, FloatOperSize.xmmword, MovOper.Read, FloatOper.Convert_f2i, size);
+    }
+    cvtps2pi_r_f(dest:Register, src:FloatRegister, size:OperationSize = OperationSize.qword):this {
+        return this._movsf(src, dest, null, 1, 0, FloatOperSize.xmmword, MovOper.Register, FloatOper.Convert_f2i, size);
+    }
+    cvtps2pi_r_rp(dest:Register, src:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this {
+        return this._movsf(src, dest, null, multiply, offset, FloatOperSize.xmmword, MovOper.Read, FloatOper.Convert_f2i, size);
+    }
+    cvttsd2si_r_f(dest:Register, src:FloatRegister, size:OperationSize = OperationSize.qword):this {
         return this._movsf(src, dest, null, 1, 0, FloatOperSize.doublePrecision, MovOper.Register, FloatOper.ConvertTruncated_f2i, size);
     }
     cvttsd2si_r_rp(dest:Register, src:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this {
         return this._movsf(src, dest, null, multiply, offset, FloatOperSize.doublePrecision, MovOper.Read, FloatOper.ConvertTruncated_f2i, size);
     }
+    cvttps2pi_r_f(dest:Register, src:FloatRegister, size:OperationSize = OperationSize.qword):this {
+        return this._movsf(src, dest, null, 1, 0, FloatOperSize.xmmword, MovOper.Register, FloatOper.ConvertTruncated_f2i, size);
+    }
+    cvttps2pi_r_rp(dest:Register, src:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this {
+        return this._movsf(src, dest, null, multiply, offset, FloatOperSize.xmmword, MovOper.Read, FloatOper.ConvertTruncated_f2i, size);
+    }
+    cvttpd2pi_r_f(dest:Register, src:FloatRegister, size:OperationSize = OperationSize.qword):this {
+        this.write(0x66);
+        return this._movsf(src, dest, null, 1, 0, FloatOperSize.xmmword, MovOper.Register, FloatOper.ConvertTruncated_f2i, size);
+    }
+    cvttpd2pi_r_rp(dest:Register, src:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this {
+        this.write(0x66);
+        return this._movsf(src, dest, null, multiply, offset, FloatOperSize.xmmword, MovOper.Read, FloatOper.ConvertTruncated_f2i, size);
+    }
 
-    cvtsi2ss_r_r(dest:FloatRegister, src:Register, size:OperationSize = OperationSize.qword):this {
+    cvtsi2ss_f_r(dest:FloatRegister, src:Register, size:OperationSize = OperationSize.qword):this {
         return this._movsf(src, dest, null, 1, 0, FloatOperSize.singlePrecision, MovOper.Register, FloatOper.Convert_i2f, size);
     }
-    cvtsi2ss_r_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this {
+    cvtsi2ss_f_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this {
         return this._movsf(src, dest, null, multiply, offset, FloatOperSize.singlePrecision, MovOper.Read, FloatOper.Convert_i2f, size);
     }
-    cvttss2si_r_r(dest:Register, src:FloatRegister, size:OperationSize = OperationSize.qword):this {
+    cvttss2si_r_f(dest:Register, src:FloatRegister, size:OperationSize = OperationSize.qword):this {
         return this._movsf(src, dest, null, 1, 0, FloatOperSize.singlePrecision, MovOper.Register, FloatOper.ConvertTruncated_f2i, size);
     }
     cvttss2si_r_rp(dest:Register, src:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this {
         return this._movsf(src, dest, null, multiply, offset, FloatOperSize.singlePrecision, MovOper.Read, FloatOper.ConvertTruncated_f2i, size);
     }
+    cvtss2si_r_f(dest:Register, src:FloatRegister, size:OperationSize = OperationSize.qword):this {
+        return this._movsf(src, dest, null, 1, 0, FloatOperSize.singlePrecision, MovOper.Register, FloatOper.Convert_f2i, size);
+    }
+    cvtss2si_r_rp(dest:Register, src:Register, multiply:AsmMultiplyConstant, offset:number, size:OperationSize = OperationSize.qword):this {
+        return this._movsf(src, dest, null, multiply, offset, FloatOperSize.singlePrecision, MovOper.Read, FloatOper.Convert_f2i, size);
+    }
 
-    cvtsd2ss_r_r(dest:FloatRegister, src:FloatRegister):this {
+    cvtsd2ss_f_f(dest:FloatRegister, src:FloatRegister):this {
         return this._movsf(src, dest, null, 1, 0, FloatOperSize.doublePrecision, MovOper.Register, FloatOper.ConvertPrecision, OperationSize.dword);
     }
-    cvtsd2ss_r_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number):this {
+    cvtsd2ss_f_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number):this {
         return this._movsf(src, dest, null, multiply, offset, FloatOperSize.doublePrecision, MovOper.Read, FloatOper.ConvertPrecision, OperationSize.dword);
     }
-    cvtss2sd_r_r(dest:FloatRegister, src:FloatRegister):this {
+    cvtss2sd_f_f(dest:FloatRegister, src:FloatRegister):this {
         return this._movsf(src, dest, null, 1, 0, FloatOperSize.singlePrecision, MovOper.Register, FloatOper.ConvertPrecision, OperationSize.dword);
     }
-    cvtss2sd_r_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number):this {
+    cvtss2sd_f_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number):this {
         return this._movsf(src, dest, null, multiply, offset, FloatOperSize.singlePrecision, MovOper.Read, FloatOper.ConvertPrecision, OperationSize.dword);
     }
+    cvtps2pd_f_f(dest:FloatRegister, src:FloatRegister):this {
+        return this._movsf(src, dest, null, 1, 0, FloatOperSize.xmmword, MovOper.Register, FloatOper.ConvertPrecision, OperationSize.dword);
+    }
+    cvtps2pd_f_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        return this._movsf(src, dest, null, multiply, offset, FloatOperSize.xmmword, MovOper.Read, FloatOper.ConvertPrecision, OperationSize.dword);
+    }
+    cvtpd2ps_f_f(dest:FloatRegister, src:FloatRegister):this {
+        this.write(0x66);
+        return this._movsf(src, dest, null, 1, 0, FloatOperSize.xmmword, MovOper.Register, FloatOper.ConvertPrecision, OperationSize.dword);
+    }
+    cvtpd2ps_f_rp(dest:FloatRegister, src:Register, multiply:AsmMultiplyConstant, offset:number):this {
+        this.write(0x66);
+        return this._movsf(src, dest, null, multiply, offset, FloatOperSize.xmmword, MovOper.Read, FloatOper.ConvertPrecision, OperationSize.dword);
+    }
 
-    label(labelName:string, exportDef:boolean = false):this {
-        const label = this._getJumpTarget(labelName);
-        if ((label instanceof Defination) || label.chunk !== null) {
-            throw Error(`${labelName} is already defined`);
+    makeLabel(labelName:string|null, exportDef:boolean = false, isProc:boolean = false):Label{
+        let label:Label;
+        if (labelName !== null) {
+            const exists = this.ids.get(labelName);
+            if (exists != null) {
+                if (exists instanceof Defination) {
+                    throw Error(`${labelName} is already defined`);
+                }
+                if (!(exists instanceof Label)) throw Error(`${labelName} is not label`);
+                if (exists.chunk !== null) {
+                    throw Error(`${labelName} is already defined`);
+                }
+                label = exists;
+            } else {
+                label = new Label(labelName);
+                this.ids.set(labelName, label);
+            }
+        } else {
+            label = new Label(labelName);
         }
+        if (isProc) label.UnwindCodes = [];
+
         label.chunk = this.chunk;
         label.offset = this.chunk.size;
         this.chunk.ids.push(label);
-        if (!exportDef) this.scope.add(labelName);
 
-        let now = this.chunk;
-        let prev = now.prev!;
+        if (labelName !== null) {
+            if (!exportDef) this.scope.add(labelName);
 
-        while (prev !== null && prev.jump!.label === label) {
-            this._resolveLabelSizeForward(prev, prev.jump!);
-            now = prev;
-            prev = now.prev!;
+            let now = this.chunk;
+            let prev = now.prev!;
+
+            while (prev !== null && prev.jump!.label === label) {
+                this._resolveLabelSizeForward(prev, prev.jump!);
+                now = prev;
+                prev = now.prev!;
+            }
         }
+        return label;
+    }
+
+    label(labelName:string, exportDef:boolean = false):this {
+        this.makeLabel(labelName, exportDef);
         return this;
     }
 
@@ -1474,10 +2001,9 @@ export class X64Assembler {
     close_label(labelName:string):this {
         const label = this.ids.get(labelName);
         if (!(label instanceof Label)) throw Error(`${labelName} is not label`);
-        if (label.chunk !== null) throw Error(`${labelName} is already defined`);
+        if (label.chunk !== null) throw Error(`${label} is already defined`);
         label.chunk = this.chunk;
         label.offset = this.chunk.size;
-        this.chunk.ids.push(label);
         let now = this.chunk;
         let prev = now.prev!;
         while (prev !== null && prev.jump!.label === label) {
@@ -1489,18 +2015,22 @@ export class X64Assembler {
         return this;
     }
 
-    private _getJumpTarget(labelName:string):Label|Defination {
-        const id = this.ids.get(labelName);
-        if (id) {
-            if (id instanceof Defination) {
-                if (id.size !== OperationSize.qword) throw Error(`${labelName} size unmatched`);
+    private _getJumpTarget(labelName:string|null):Label|Defination {
+        if (labelName !== null) {
+            const id = this.ids.get(labelName);
+            if (id) {
+                if (id instanceof Defination) {
+                    if (id.size !== OperationSize.qword) throw Error(`${labelName} size unmatched`);
+                    return id;
+                }
+                if (!(id instanceof Label)) throw Error(`${labelName} is not label`);
                 return id;
             }
-            if (!(id instanceof Label)) throw Error(`${labelName} is not label`);
-            return id;
         }
         const label = new Label(labelName);
-        this.ids.set(labelName, label);
+        if (labelName !== null) {
+            this.ids.set(labelName, label);
+        }
         return label;
     }
 
@@ -1643,7 +2173,7 @@ export class X64Assembler {
         chunk = this.chunk;
         chunk.jump = new SplitedJump(info, label, args, this.pos);
         this.pos = null;
-        const nbuf = new AsmChunk(new Uint8Array(64), 0);
+        const nbuf = new AsmChunk(new Uint8Array(64), 0, 1);
         chunk.next = nbuf;
         nbuf.prev = chunk;
         this.chunk = nbuf;
@@ -1672,7 +2202,7 @@ export class X64Assembler {
             chunks.add(chunk);
             for (const id of chunk.ids) {
                 if (id.chunk !== chunk) {
-                    putError(id.name, 'Chunk does not matched');
+                    putError(id.name || '[anonymous label]', 'Chunk does not match');
                 }
                 ids.add(id);
             }
@@ -1683,16 +2213,16 @@ export class X64Assembler {
             if (id instanceof AddressIdentifier) {
                 if (id.chunk === null) {
                     if (!final) continue;
-                    putError(id.name, 'Label is not defined');
+                    putError(id.name || '[anonymous label]', 'Label is not defined');
                     continue;
                 }
                 if (!ids.has(id)) {
                     if (id.chunk === MEMORY_INDICATE_CHUNK) continue;
-                    putError(id.name, 'Unknown identifier');
+                    putError(id.name || '[anonymous label]', 'Unknown identifier');
                 }
                 if (!chunks.has(id.chunk)) {
                     const jumpTarget = id.chunk.jump;
-                    putError(id.name, `Unknown chunk, ${(jumpTarget === null ? '[??]' : jumpTarget.label.name)}`);
+                    putError(id.name || '[anonymous label]', `Unknown chunk, ${(jumpTarget === null ? '[??]' : jumpTarget.label.name)}`);
                 }
             }
         }
@@ -1706,36 +2236,21 @@ export class X64Assembler {
         }
     }
 
-    private _makeSeh():void {
-
-        const sehChunk = new AsmChunk(new Uint8Array(64), 0);
-        const UNW_VERSION = 0x01;
-        const UNW_FLAG_EHANDLER = 0x08;
-
-        for (;;) {
-            // UNWIND_INFO
-            sehChunk.writeInt32(UNW_VERSION | UNW_FLAG_EHANDLER);
-            sehChunk.writeInt32(0);
+    private _normalize(makeRuntimeFunctionTable:boolean):this {
+        if (this.normalized) return this;
+        this.normalized = true;
+        if (makeRuntimeFunctionTable && this.currentProc === this.headProc) {
+            this.endp();
+        } else {
+            if (this.currentProc !== null) {
+                const unwinds = this.currentProc.UnwindCodes;
+                if (unwinds !== null && unwinds.length !== 0) {
+                    throw Error(`This asm has unwind codes. stack_c or keep_r needs a runtime function table`);
+                }
+            }
         }
 
-        // let fnname = '';
-        // let fnstart = 0;
-        // for (const id of this.ids.values()) {
-        //     if (!(id instanceof Label)) continue;
-        //     if (fnname !== '') {
-        //         sehChunk.writeInt32(fnstart);
-        //         sehChunk.writeInt32(id.offset);
-        //         sehChunk.writeInt32(0);
-        //         continue;
-        //     }
-        //     fnname = id.name;
-        //     fnstart = id.offset;
-        // }
-
-    }
-
-    private _normalize():this {
-
+        // resolving labels
         const errors = new ParsingErrorContainer;
         let prev = this.chunk.prev;
         while (prev !== null) {
@@ -1751,31 +2266,90 @@ export class X64Assembler {
 
         const chunk = this.chunk;
         if (chunk.next !== null || chunk.prev !== null) {
-            throw Error(`All chunks don't merge. internal problem.`);
+            throw Error(`All chunks didn't merge. internal problem`);
         }
 
+        // attach const chunk
         if (this.constChunk !== null) {
             chunk.connect(this.constChunk);
             this.constChunk = null;
             chunk.removeNext();
         }
 
-        const memalign = this.memoryChunkAlign;
-        const bufsize = (this.chunk.size + memalign - 1) & ~(memalign-1);
-        this.chunk.putRepeat(0xcc, bufsize - this.chunk.size);
+        if (makeRuntimeFunctionTable) {
+            // align 4 bytes
+            const last = chunk.size;
+            const alignto = (this.chunk.size + 4 - 1) & ~3;
+            this.chunk.putRepeat(0xcc, alignto - this.chunk.size);
 
-        try {
-            chunk.resolveAll();
-        } catch (err) {
-            if (err instanceof ParsingError) {
-                errors.add(err);
-            } else {
-                throw err;
+            // write runtime table
+            let lastFunction:RUNTIME_FUNCTION|null = null;
+            const functions:RUNTIME_FUNCTION[] = [];
+
+            const procs:Label[] = [];
+            for (const proc of this.ids.values()) {
+                if (!(proc instanceof Label)) continue;
+                procs.push(proc);
+            }
+            procs.sort((a,b)=>a.offset-b.offset);
+
+            let lastProc:Label|undefined;
+
+            for (const proc of procs) {
+                if (proc.UnwindCodes === null) continue;
+                if (lastFunction !== null) {
+                    if (proc.offset === lastFunction.BeginAddress) continue;
+
+                    lastFunction.EndAddress = proc.offset;
+                    lastFunction.UnwindData = chunk.size;
+                    functions.push(lastFunction);
+                    lastProc!.writeUnwindInfoTo(chunk, lastFunction.BeginAddress);
+                }
+                lastProc = proc;
+                lastFunction = {
+                    BeginAddress: proc.offset,
+                    EndAddress: 0,
+                    UnwindData: 0,
+                };
+            }
+            if (lastFunction !== null) {
+                lastFunction.EndAddress = last;
+                lastFunction.UnwindData = chunk.size;
+                functions.push(lastFunction);
+                lastProc!.writeUnwindInfoTo(chunk, lastFunction.BeginAddress);
+            }
+
+            if (functions.length !== 0) {
+                this.label('#runtime_function_table', true);
+                for (const func of functions) {
+                    chunk.writeInt32(func.BeginAddress);
+                    chunk.writeInt32(func.EndAddress);
+                    chunk.writeInt32(func.UnwindData);
+                }
             }
         }
-        if (errors.error !== null) {
-            throw errors.error;
+
+        if (this.memoryChunkSize !== 0) {
+            // align memory area
+            const memalign = this.memoryChunkAlign;
+            const bufsize = (this.chunk.size + memalign - 1) & ~(memalign-1);
+            this.chunk.putRepeat(0xcc, bufsize - this.chunk.size);
+
+            // resolve def addresses
+            try {
+                chunk.resolveAll();
+            } catch (err) {
+                if (err instanceof ParsingError) {
+                    errors.add(err);
+                } else {
+                    throw err;
+                }
+            }
+            if (errors.error !== null) {
+                throw errors.error;
+            }
         }
+
         return this;
     }
 
@@ -1799,20 +2373,89 @@ export class X64Assembler {
     jg_label(label:string):this { return this._jmp_o_label(JumpOperation.jg, label); }
 
     proc(name:string, exportDef:boolean = false):this {
-        this.label(name, exportDef);
+        this.currentProc = this.makeLabel(name, exportDef, true);
         this.scopeStack.push(this.scope);
         this.scope = new Set;
+        this.prologueAnchor = this.makeLabel(null);
+        return this;
+    }
+
+    runtime_error_handler():this {
+        if (this.currentProc === null) {
+            throw Error(`not in proc`);
+        }
+        if (!this.unwinded) {
+            this.label('_eof');
+            this.unwind();
+            this.ret();
+        }
+        this.currentProc.exceptionHandler = this.makeLabel(null);
+        return this;
+    }
+
+    unwind():this {
+        if (this.currentProc === null) throw Error(`not in proc`);
+        const codes = this.currentProc.UnwindCodes;
+        if (codes === null) throw Error(`currentProc is not proc`);
+        for (let i=codes.length-1;i>=0;i--) {
+            const code = codes[i];
+            if (typeof code === 'number') continue;
+            switch (code.UnwindOp) {
+            case UWOP_PUSH_NONVOL:
+                this.pop_r(code.OpInfo);
+                break;
+            case UWOP_ALLOC_SMALL:
+                this.add_r_c(Register.rsp, code.OpInfo*8+8);
+                break;
+            case UWOP_ALLOC_LARGE:
+                if (code.OpInfo === 0) {
+                    const n = codes[--i];
+                    if (typeof n !== 'number') throw Error(`number expected after UWOP_ALLOC_LARGE`);
+                    this.add_r_c(Register.rsp, n * 8);
+                } else if (code.OpInfo === 1) {
+                    const n = codes[--i];
+                    if (typeof n !== 'number') throw Error(`number expected after UWOP_ALLOC_LARGE`);
+                    const n2 = codes[--i];
+                    if (typeof n2 !== 'number') throw Error(`number expected after UWOP_ALLOC_LARGE`);
+                    this.add_r_c(Register.rsp, (n2 << 16) | n);
+                } else {
+                    throw Error(`Unexpected OpInfo of UWOP_ALLOC_LARGE (${code.OpInfo})`);
+                }
+                break;
+            case UWOP_SET_FPREG:
+                if (this.currentProc.frameRegister === null) throw Error(`Frame register is not set`);
+                this.lea_r_rp(Register.rsp, this.currentProc.frameRegister, 1, - this.currentProc.frameRegisterOffset * 16);
+                break;
+            default:
+                throw Error(`Unexpected unwindop (${code.UnwindOp})`);
+            }
+        }
+        this.unwinded = true;
         return this;
     }
 
     endp():this {
-        if (this.scopeStack.length === 0) throw Error(`end of scope`);
+        if (this.scopeStack.length === 0) {
+            throw Error(`end of scope`);
+        }
+        if (this.currentProc === null) {
+            throw Error(`not in proc`);
+        }
+
+        if (!this.unwinded) {
+            this.label('_eof');
+            this.unwind();
+            this.ret();
+        }
+
         const scope = this.scope;
         this.scope = this.scopeStack.pop()!;
-
         for (const name of scope) {
             this.ids.delete(name);
         }
+        this.prologueAnchor = null;
+        this.currentProc = null;
+        this.unwinded = false;
         return this;
     }
 
@@ -1831,7 +2474,7 @@ export class X64Assembler {
         const sizes:(OperationSize|null)[] = [null, null];
         let extendingCommand = false;
         function setSize(nsize:OperationSize|undefined):void {
-            if (nsize === undefined) return;
+            if (nsize == null) return;
 
             let idx = 0;
             if (extendingCommand) {
@@ -1852,8 +2495,7 @@ export class X64Assembler {
         }
 
         function parseType(type:string):TypeInfo {
-
-            let arraySize = 0;
+            let arraySize:number|null = null;
             let brace = type.indexOf('[');
             let type_base = type;
             if (brace !== -1) {
@@ -1871,16 +2513,18 @@ export class X64Assembler {
             }
 
             const size = sizemap.get(type_base);
-            if (size === undefined) throw parser.error(`Unexpected type name '${type}'`);
+            if (size == null) throw parser.error(`Unexpected type name '${type}'`);
 
-            return {bytes: size.bytes * Math.max(arraySize, 1), size:size.size, align:size.bytes, arraySize};
+            let bytes = size.bytes;
+            if (arraySize !== null) bytes *= arraySize;
+            return {bytes, size:size.size, align:size.bytes, arraySize};
         }
 
         const readConstString = (addressCommand:boolean, encoding:BufferEncoding):void=>{
             const quotedString = parser.readQuotedStringTo('"');
             if (quotedString === null) throw parser.error('Invalid quoted string');
-            if (this.constChunk === null) this.constChunk = new AsmChunk(new Uint8Array(64), 0);
-            const id = new Defination('[const]', this.constChunk, this.constChunk.size, OperationSize.void);
+            if (this.constChunk === null) this.constChunk = new AsmChunk(new Uint8Array(64), 0, 1);
+            const id = new Defination('[const]', this.constChunk, this.constChunk.size, null, OperationSize.void);
             this.constChunk.write(Buffer.from(quotedString+'\0', encoding));
             this.constChunk.ids.push(id);
             command += '_rp';
@@ -1899,9 +2543,9 @@ export class X64Assembler {
             case 'const': {
                 const [name, type] = parser.readToSpace().split(':');
                 let size:TypeSize|null|undefined = null;
-                if (type !== undefined) {
+                if (type != null) {
                     size = sizemap.get(type);
-                    if (size === undefined) throw parser.error(`Unexpected type syntax '${type}'`);
+                    if (size == null) throw parser.error(`Unexpected type syntax '${type}'`);
                 }
                 const text = parser.readAll();
                 const value = this._polynominal(text, parser.lineNumber, parser.matchedIndex);
@@ -1934,7 +2578,7 @@ export class X64Assembler {
                 const type = parser.readAll();
                 const res = parseType(type);
                 try {
-                    this.def(name, res.size, res.bytes, res.align, exportDef);
+                    this.def(name, res.size, res.bytes, res.align, res.arraySize, exportDef);
                 } catch (err) {
                     throw parser.error(err.message);
                 }
@@ -1942,7 +2586,8 @@ export class X64Assembler {
             }
             case 'proc':
                 try {
-                    this.proc(parser.readAll().trim(), exportDef);
+                    const name = parser.readAll().trim();
+                    this.proc(name, exportDef);
                 } catch (err) {
                     throw parser.error(err.message);
                 }
@@ -2027,7 +2672,7 @@ export class X64Assembler {
                         if (words[1] === 'ptr') {
                             const sizename = words[0];
                             const size = sizemap.get(sizename);
-                            if (size === undefined || size.size === OperationSize.void) {
+                            if (size == null || size.size === OperationSize.void) {
                                 throw parser.error(`Unexpected size name: ${sizename}`);
                             }
                             if (addressCommand) setSize(OperationSize.qword);
@@ -2075,7 +2720,7 @@ export class X64Assembler {
                     const type = regmap.get(param.toLowerCase());
                     if (type) {
                         const [name, reg, size]  = type;
-                        setSize(size);
+                        if (size !== null) setSize(size);
                         command += `_${name.short}`;
                         args.push(reg);
                         callinfo.push(`(${name.name})`);
@@ -2105,7 +2750,7 @@ export class X64Assembler {
                             args.push(0);
                             if (id instanceof Label) {
                                 unresolvedConstant = id;
-                            } else if (id !== undefined) {
+                            } else if (id != null) {
                                 throw parser.error(`Unexpected identifier '${id.name}'`);
                             } else {
                                 const label = new Label(param);
@@ -2123,7 +2768,12 @@ export class X64Assembler {
         parser.matchedWidth = parser.matchedIndex + parser.matchedWidth - totalIndex;
 
         if (command.endsWith(':')) {
-            this.label(command.substr(0, command.length-1).trim());
+            try {
+                this.label(command.substr(0, command.length-1).trim());
+            } catch (err) {
+                console.log(remapStack(err.stack));
+                throw parser.error(err.message);
+            }
             return;
         }
 
@@ -2151,7 +2801,7 @@ export class X64Assembler {
         }
     }
 
-    compile(source:string, defines?:Record<string, number>|null, reportDirectWithFileName?:string|null):void{
+    compile(source:string, defines?:Record<string, number>|null, reportDirectWithFileName?:string|null):this{
         let p = 0;
         let lineNumber = 1;
         if (defines != null) {
@@ -2185,7 +2835,7 @@ export class X64Assembler {
         if (errs !== null && errs.error !== null) throw errs.error;
 
         try {
-            this._normalize();
+            this._normalize(true);
         } catch (err) {
             if (err instanceof ParsingError) {
                 if (reportDirectWithFileName) {
@@ -2197,6 +2847,7 @@ export class X64Assembler {
                 throw err;
             }
         }
+        return this;
     }
 
     save():Uint8Array {
@@ -2207,7 +2858,7 @@ export class X64Assembler {
             out.put(0);
         }
         function writeAddress(id:AddressIdentifier):void {
-            out.writeNullTerminatedString(id.name);
+            out.writeNullTerminatedString(id.name!);
             out.writeVarUint(id.offset - address);
             address = id.offset;
         }
@@ -2216,14 +2867,13 @@ export class X64Assembler {
         const labels:Label[] = [];
         const defs:Defination[] = [];
         for (const id of this.ids.values()) {
-            if (this.scope.has(id.name)) continue;
+            if (this.scope.has(id.name!)) continue;
             if (id instanceof Label) {
                 labels.push(id);
             } else if (id instanceof Defination) {
                 defs.push(id);
             }
         }
-        labels.sort((a,b)=>a.offset-b.offset);
 
         out.writeVarUint(Math.log2(this.memoryChunkAlign));
         let address = 0;
@@ -2235,95 +2885,121 @@ export class X64Assembler {
         return out.buffer();
     }
 
-    toTypeScript():string {
+    toScript(bdsxLibPath:string, exportName?:string):{js:string, dts:string} {
         const buffer = this.buffer();
-        const script = new ScriptWriter;
-        script.writeln("import { cgate, VoidPointer, NativePointer } from 'bdsx/core';");
-        const n = buffer.length & ~1;
-        script.writeln(`const buffer = cgate.allocExecutableMemory(${buffer.length+this.memoryChunkSize}, ${this.memoryChunkAlign});`);
+        const rftable = this.ids.get('#runtime_function_table');
 
-        script.script += "buffer.setBin('";
+        const dts = new ScriptWriter;
+        const js = new ScriptWriter;
+
+        let imports = 'cgate';
+        if (rftable instanceof Label) {
+            imports += ', runtimeError';
+        }
+        js.writeln(`const { ${imports} } = require('${bdsxLibPath}/core');`);
+        js.writeln(`const { asm } = require('${bdsxLibPath}/assembler');`);
+        js.writeln(`require('${bdsxLibPath}/codealloc');`);
+        dts.writeln(`import { VoidPointer, NativePointer } from '${bdsxLibPath}/core';`);
+        const n = buffer.length & ~1;
+        js.writeln(`const buffer = cgate.allocExecutableMemory(${buffer.length+this.memoryChunkSize}, ${this.memoryChunkAlign});`);
+
+        js.script += "buffer.setBin('";
         for (let i=0;i<n;) {
             const low = buffer[i++];
             const high = buffer[i++];
 
             const hex = ((high << 8) | low).toString(16);
             const count = 4-hex.length;
-            script.script += '\\u';
-            if (count !== 0) script.script += '0'.repeat(count);
-            script.script += hex;
+            js.script += '\\u';
+            if (count !== 0) js.script += '0'.repeat(count);
+            js.script += hex;
         }
         if (buffer.length !== n) {
             const low = buffer[n];
             const hex = ((0xcc << 8) | low).toString(16);
             const count = 4-hex.length;
-            script.script += '\\u';
-            if (count !== 0) script.script += '0'.repeat(count);
-            script.script += hex;
+            js.script += '\\u';
+            if (count !== 0) js.script += '0'.repeat(count);
+            js.script += hex;
         }
-        script.writeln("');");
+        js.writeln("');");
         // script.writeln();
-        script.writeln('export = {');
-        script.tab(4);
+        if (exportName != null) {
+            dts.writeln(`export namespace ${exportName} {`);
+            js.writeln(`exports.${exportName} = {`);
+            dts.tab(4);
+        } else {
+            js.writeln('module.exports = {');
+        }
+        js.tab(4);
 
         for (const id of this.ids.values()) {
-            if (this.scope.has(id.name)) continue;
+            if (this.scope.has(id.name!)) continue;
+            let name = id.name;
+            if (name === null || name.startsWith('#')) continue;
+            let addrof:string;
+            if (!/^[A-Za-z_$][0-9A-Za-z_$]*$/.test(name)) {
+                name = JSON.stringify(name);
+                addrof = JSON.stringify('addressof_'+name);
+            } else {
+                addrof = 'addressof_'+name;
+            }
+
             if (id instanceof Label) {
-                script.writeln(`get ${id.name}():NativePointer{`);
-                script.writeln(`    return buffer.add(${id.offset});`);
-                script.writeln(`},`);
+                js.writeln(`get ${name}(){`);
+                js.writeln(`    return buffer.add(${id.offset});`);
+                js.writeln(`},`);
+                dts.writeln(`export const ${name}:NativePointer;`);
             } else if (id instanceof Defination) {
                 const off = buffer.length + id.offset;
-                if (id.size === undefined) {
-                    script.writeln(`get ${id.name}():NativePointer{`);
-                    script.writeln(`    return buffer.add(${off});`);
-                    script.writeln(`},`);
-                } else {
-                    switch (id.size) {
-                    case OperationSize.byte:
-                        script.writeln(`get ${id.name}():number{`);
-                        script.writeln(`    return buffer.getUint8(${off});`);
-                        script.writeln(`},`);
-                        script.writeln(`set ${id.name}(n:number):number{`);
-                        script.writeln(`    buffer.setUint8(n, ${off});`);
-                        script.writeln(`},`);
-                        break;
-                    case OperationSize.word:
-                        script.writeln(`get ${id.name}():number{`);
-                        script.writeln(`    return buffer.getUint16(${off});`);
-                        script.writeln(`},`);
-                        script.writeln(`set ${id.name}(n:number){`);
-                        script.writeln(`    buffer.setUint16(n, ${off});`);
-                        script.writeln(`},`);
-                        break;
-                    case OperationSize.dword:
-                        script.writeln(`get ${id.name}():number{`);
-                        script.writeln(`    return buffer.getInt32(${off});`);
-                        script.writeln(`},`);
-                        script.writeln(`set ${id.name}(n:number){`);
-                        script.writeln(`    buffer.setInt32(n, ${off});`);
-                        script.writeln(`},`);
-                        break;
-                    case OperationSize.qword:
-                        script.writeln(`get ${id.name}():VoidPointer{`);
-                        script.writeln(`    return buffer.getPointer(${off});`);
-                        script.writeln(`},`);
-                        script.writeln(`set ${id.name}(n:VoidPointer){`);
-                        script.writeln(`    buffer.setPointer(n, ${off});`);
-                        script.writeln(`},`);
-                        break;
-                    default:
-                        script.writeln(`get ${id.name}():NativePointer{`);
-                        script.writeln(`    return buffer.add(${off});`);
-                        script.writeln(`},`);
-                        break;
+                if (id.size != null) {
+                    const info = sizeInfo.get(id.size);
+                    if (info != null) {
+                        if (id.arraySize !== null) {
+                            const nameUpper = name.charAt(0).toUpperCase()+name.substr(1);
+                            const sizemul = info.size === 1 ? '' : '*'+info.size;
+                            js.writeln(`get${nameUpper}(idx){`);
+                            js.writeln(`    return buffer.get${info.fnname}(${off}+idx${sizemul});`);
+                            js.writeln(`},`);
+                            js.writeln(`set${nameUpper}(n, idx){`);
+                            js.writeln(`    buffer.set${info.fnname}(n, ${off}+idx${sizemul});`);
+                            js.writeln(`},`);
+                            dts.writeln(`export function get${nameUpper}(idx:number):${info.jstype};`);
+                            dts.writeln(`export function set${nameUpper}(n:${info.jstype}, idx:number):void;`);
+                        } else {
+                            js.writeln(`get ${name}(){`);
+                            js.writeln(`    return buffer.get${info.fnname}(${off});`);
+                            js.writeln(`},`);
+                            js.writeln(`set ${name}(n){`);
+                            js.writeln(`    buffer.set${info.fnname}(n, ${off});`);
+                            js.writeln(`},`);
+                            dts.writeln(`export let ${name}:${info.jstype};`);
+                        }
                     }
                 }
+                js.writeln(`get ${addrof}(){`);
+                js.writeln(`    return buffer.add(${off});`);
+                js.writeln(`},`);
+                dts.writeln(`export const ${addrof}:NativePointer;`);
             }
         }
-        script.tab(-4);
-        script.writeln('};');
-        return script.script;
+        js.tab(-4);
+        js.writeln('};');
+        if (exportName != null) {
+            dts.tab(-4);
+            dts.writeln(`}`);
+        }
+
+        if (rftable instanceof Label) {
+            const SIZE_OF_RF = 4 * 3;
+            const size = (buffer.length - rftable.offset) / SIZE_OF_RF | 0;
+            js.writeln(`runtimeError.addFunctionTable(buffer.add(${rftable.offset}), ${size}, buffer);`);
+
+            const labels = this.labels(true);
+            js.writeln(`asm.setFunctionNames(buffer, ${JSON.stringify(labels)});`);
+        }
+
+        return {js: js.script, dts:dts.script};
     }
 
     static load(bin:Uint8Array):X64Assembler {
@@ -2370,7 +3046,7 @@ export class X64Assembler {
         }
         for (const [name, offset] of defs) {
             if (out.ids.has(name)) throw Error(`${name} is already defined`);
-            const def = new Defination(name, MEMORY_INDICATE_CHUNK, offset, undefined);
+            const def = new Defination(name, MEMORY_INDICATE_CHUNK, offset, null, undefined);
             out.ids.set(name, def);
         }
         return out;
@@ -2385,15 +3061,38 @@ export function asm():X64Assembler {
     return new X64Assembler(new Uint8Array(64), 0);
 }
 
-function shex(v:number|bin64_t):string {
-    if (typeof v === 'string') return `0x${bin.toString(v, 16)}`;
-    if (v < 0) return `-0x${(-v).toString(16)}`;
-    else return `0x${v.toString(16)}`;
+function value64ToString16(v:Value64Castable):string {
+    const [low, high] = v[asm.splitTwo32Bits]();
+    if (high === 0) {
+        return '0x'+low.toString(16);
+    }
+    const lowstr = low.toString(16);
+    return '0x' + high.toString(16) + '0'.repeat(16-lowstr.length) + lowstr;
 }
-function shex_o(v:number|bin64_t):string {
+
+function uhex(v:Value64):string {
+    if (typeof v === 'string') return `0x${bin.toString(v, 16)}`;
+    if (typeof v === 'number') {
+        if (v < 0) v = v>>>0;
+        return `0x${v.toString(16)}`;
+    }
+    return value64ToString16(v);
+}
+function shex(v:Value64):string {
+    if (typeof v === 'string') return `0x${bin.toString(v, 16)}`;
+    if (typeof v === 'number') {
+        if (v < 0) return `-0x${(-v).toString(16)}`;
+        else return `0x${v.toString(16)}`;
+    }
+    return value64ToString16(v);
+}
+function shex_o(v:Value64):string {
     if (typeof v === 'string') return `+0x${bin.toString(v, 16)}`;
-    if (v < 0) return `-0x${(-v).toString(16)}`;
-    else return `+0x${v.toString(16)}`;
+    if (typeof v === 'number') {
+        if (v < 0) return `-0x${(-v).toString(16)}`;
+        else return `+0x${v.toString(16)}`;
+    }
+    return '+'+value64ToString16(v);
 }
 
 const REVERSE_MAP:Record<string, string> = {
@@ -2415,8 +3114,7 @@ const REVERSE_MAP:Record<string, string> = {
     jg: 'jle',
 };
 
-interface Code extends X64Assembler
-{
+interface Code extends X64Assembler {
     [key:string]: any;
 }
 
@@ -2426,9 +3124,10 @@ class ArgName {
         public readonly short:string) {
     }
     public static readonly Register=new ArgName('register', 'r');
+    public static readonly FloatRegister=new ArgName('xmm register', 'f');
     public static readonly Const=new ArgName('const', 'c');
 }
-const regmap = new Map<string, [ArgName, Register, OperationSize]>([
+const regmap = new Map<string, [ArgName, Register|FloatRegister, OperationSize|null]>([
     ['rip', [ArgName.Register, Register.rip, OperationSize.qword]],
     ['rax', [ArgName.Register, Register.rax, OperationSize.qword]],
     ['rcx', [ArgName.Register, Register.rcx, OperationSize.qword]],
@@ -2497,22 +3196,63 @@ const regmap = new Map<string, [ArgName, Register, OperationSize]>([
     ['r13b', [ArgName.Register, Register.r13, OperationSize.byte]],
     ['r14b', [ArgName.Register, Register.r14, OperationSize.byte]],
     ['r15b', [ArgName.Register, Register.r15, OperationSize.byte]],
+
+    ['xmm0', [ArgName.FloatRegister, FloatRegister.xmm0, null]],
+    ['xmm1', [ArgName.FloatRegister, FloatRegister.xmm1, null]],
+    ['xmm2', [ArgName.FloatRegister, FloatRegister.xmm2, null]],
+    ['xmm3', [ArgName.FloatRegister, FloatRegister.xmm3, null]],
+    ['xmm4', [ArgName.FloatRegister, FloatRegister.xmm4, null]],
+    ['xmm5', [ArgName.FloatRegister, FloatRegister.xmm5, null]],
+    ['xmm6', [ArgName.FloatRegister, FloatRegister.xmm6, null]],
+    ['xmm7', [ArgName.FloatRegister, FloatRegister.xmm7, null]],
+    ['xmm8', [ArgName.FloatRegister, FloatRegister.xmm8, null]],
+    ['xmm9', [ArgName.FloatRegister, FloatRegister.xmm9, null]],
+    ['xmm10', [ArgName.FloatRegister, FloatRegister.xmm10, null]],
+    ['xmm11', [ArgName.FloatRegister, FloatRegister.xmm11, null]],
+    ['xmm12', [ArgName.FloatRegister, FloatRegister.xmm12, null]],
+    ['xmm13', [ArgName.FloatRegister, FloatRegister.xmm13, null]],
+    ['xmm14', [ArgName.FloatRegister, FloatRegister.xmm14, null]],
+    ['xmm15', [ArgName.FloatRegister, FloatRegister.xmm15, null]],
 ]);
 
-function checkModified(ori:string, out:string):boolean{
-    const ostat = fs.statSync(ori);
-
-    try{
-        const nstat = fs.statSync(out);
-        return ostat.mtimeMs >= nstat.mtimeMs;
-    } catch (err){
-        return true;
-    }
+const regnamemap:string[] = [];
+for (const [name, [type, reg, size]] of regmap) {
+    if (size === null) continue;
+    regnamemap[reg | (size << 4)] = name;
 }
 
-export namespace asm
-{
+const defaultOperationSize = new WeakMap<(...args:any[])=>any, OperationSize>();
+
+export namespace asm {
     export const code:Code = X64Assembler.prototype;
+    defaultOperationSize.set(code.call_rp, OperationSize.qword);
+    defaultOperationSize.set(code.jmp_rp, OperationSize.qword);
+    defaultOperationSize.set(code.movss_f_f, OperationSize.dword);
+    defaultOperationSize.set(code.movss_f_rp, OperationSize.dword);
+    defaultOperationSize.set(code.movss_rp_f, OperationSize.dword);
+    defaultOperationSize.set(code.movsd_f_f, OperationSize.qword);
+    defaultOperationSize.set(code.movsd_f_rp, OperationSize.qword);
+    defaultOperationSize.set(code.movsd_rp_f, OperationSize.qword);
+    defaultOperationSize.set(code.cvtsi2sd_f_r, OperationSize.qword);
+    defaultOperationSize.set(code.cvtsi2sd_f_rp, OperationSize.qword);
+    defaultOperationSize.set(code.cvtsd2si_r_f, OperationSize.qword);
+    defaultOperationSize.set(code.cvtsd2si_r_rp, OperationSize.qword);
+    defaultOperationSize.set(code.cvttsd2si_r_f, OperationSize.qword);
+    defaultOperationSize.set(code.cvttsd2si_r_rp, OperationSize.qword);
+    defaultOperationSize.set(code.cvtsi2ss_f_r, OperationSize.dword);
+    defaultOperationSize.set(code.cvtsi2ss_f_rp, OperationSize.dword);
+    defaultOperationSize.set(code.cvtss2si_r_f, OperationSize.dword);
+    defaultOperationSize.set(code.cvtss2si_r_rp, OperationSize.dword);
+    defaultOperationSize.set(code.cvttss2si_r_f, OperationSize.dword);
+    defaultOperationSize.set(code.cvttss2si_r_rp, OperationSize.dword);
+    defaultOperationSize.set(code.movups_f_f, OperationSize.xmmword);
+    defaultOperationSize.set(code.movups_f_rp, OperationSize.xmmword);
+    defaultOperationSize.set(code.movups_rp_f, OperationSize.xmmword);
+    for (let i=0;i<16;i++) {
+        const jumpoper = JumpOperation[i].substr(1);
+        defaultOperationSize.set(code[`set${jumpoper}_r`], OperationSize.byte);
+        defaultOperationSize.set(code[`set${jumpoper}_rp`], OperationSize.byte);
+    }
     export const splitTwo32Bits = Symbol('splitTwo32Bits');
     export interface ParameterBase {
         argi:number;
@@ -2524,6 +3264,23 @@ export namespace asm
     }
     export interface ParameterRegisterPointer extends ParameterBase {
         type:'rp';
+        register:Register;
+        multiply:AsmMultiplyConstant;
+        offset:number;
+    }
+    export interface ParameterConstantPointer extends ParameterBase {
+        type:'cp';
+        address:Value64;
+    }
+    export interface ParameterRegisterRegisterPointer extends ParameterBase {
+        type:'rrp';
+        register:Register;
+        register2:Register;
+        multiply:AsmMultiplyConstant;
+        offset:number;
+    }
+    export interface ParameterFarPointer extends ParameterBase {
+        type:'fp';
         register:Register;
         multiply:AsmMultiplyConstant;
         offset:number;
@@ -2540,7 +3297,7 @@ export namespace asm
         type:'label';
         label:string;
     }
-    export type Parameter = ParameterRegister | ParameterRegisterPointer | ParameterFloatRegister | ParameterConstant | ParameterLabel;
+    export type Parameter = ParameterRegister | ParameterRegisterPointer | ParameterConstantPointer | ParameterRegisterRegisterPointer | ParameterFloatRegister | ParameterFarPointer | ParameterConstant | ParameterLabel;
 
     export class Operation {
         public size = -1;
@@ -2574,9 +3331,16 @@ export namespace asm
                         throw Error(`${this.code.name}: Invalid parameter ${r} at ${i}`);
                     }
                     out.push({
-                        type, argi: argi_ori, parami:i, register: r
+                        type, argi: argi_ori, parami:i, register: r,
                     });
-                } else if (type === 'rp') {
+                } else if (type === 'cp') {
+                    const r = this.args[argi++];
+                    if (typeof r !== 'number' || r < -1 || r >= 16) {
+                        throw Error(`${this.code.name}: Invalid parameter ${r} at ${i}`);
+                    }
+                    const address = this.args[argi++];
+                    out.push({ type, argi: argi_ori, parami: i, address });
+                } else if (type === 'rp' || type === 'fp') {
                     const r = this.args[argi++];
                     if (typeof r !== 'number' || r < -1 || r >= 16) {
                         throw Error(`${this.code.name}: Invalid parameter ${r} at ${i}`);
@@ -2585,22 +3349,22 @@ export namespace asm
                     const offset = this.args[argi++];
                     out.push({
                         type, argi: argi_ori, parami:i, register: r,
-                        multiply, offset
+                        multiply, offset,
                     });
                 } else if (type === 'c') {
                     const constant = this.args[argi++];
                     out.push({
-                        type, argi: argi_ori, parami:i, constant
+                        type, argi: argi_ori, parami:i, constant,
                     });
                 } else if (type === 'f') {
                     const freg = this.args[argi++];
                     out.push({
-                        type, argi: argi_ori, parami:i, register:freg
+                        type, argi: argi_ori, parami:i, register:freg,
                     });
                 } else if (type === 'label') {
                     const label = this.args[argi++];
                     out.push({
-                        type, argi: argi_ori, parami:i, label
+                        type, argi: argi_ori, parami:i, label,
                     });
                 } else {
                     argi ++;
@@ -2614,14 +3378,38 @@ export namespace asm
             const name = code.name;
             const splited = name.split('_');
             const cmd = splited.shift()!;
+
             let i=0;
-            const ptridx:number[] = [];
+            for (const item of splited) {
+                switch (item) {
+                case 'r':
+                case 'f':
+                case 'c':
+                case 'cp':
+                    i ++;
+                    break;
+                case 'rp':
+                case 'fp':
+                    i += 3;
+                    break;
+                case 'rrp':
+                    i += 4;
+                    break;
+                }
+            }
+
+            let sizei = i;
+            const size:OperationSize|null|undefined = defaultOperationSize.get(code) ?? args[sizei];
+            i = 0;
+
             const argstr:string[] = [];
             for (const item of splited) {
+
+                const nsize:OperationSize|null|undefined = args[sizei++] ?? size;
                 const v = args[i++];
                 switch (item) {
                 case 'r':
-                    argstr.push(Register[v]);
+                    argstr.push(getRegisterName(v, nsize));
                     break;
                 case 'f':
                     argstr.push(FloatRegister[v]);
@@ -2629,19 +3417,33 @@ export namespace asm
                 case 'c':
                     argstr.push(shex(v));
                     break;
-                case 'rp': {
-                    ptridx.push(argstr.length);
+                case 'cp':
+                    argstr.push(uhex(v));
+                    break;
+                case 'rp':
+                case 'fp': {
                     const multiply = args[i++];
-                    argstr.push(`[${Register[v]}${multiply !== 1 ? `*${multiply}` : ''}${shex_o(args[i++])}]`);
+                    const offset = args[i++];
+                    let str = `[${Register[v]}${multiply !== 1 ? `*${multiply}` : ''}${offset !== 0 ? shex_o(offset) : ''}]`;
+                    if (item === 'fp') {
+                        str = `fword ptr ${str}`;
+                    } else if (nsize != null) {
+                        str = `${OperationSize[nsize]} ptr ${str}`;
+                    }
+                    argstr.push(str);
                     break;
                 }
+                case 'rrp': {
+                    const r2 = args[i++];
+                    const multiply = args[i++];
+                    const offset = args[i++];
+                    let str = `[${Register[v]}+${Register[r2]}${multiply !== 1 ? `*${multiply}` : ''}${offset !== 0 ? shex_o(offset) : ''}]`;
+                    if (nsize != null) {
+                        str = `${OperationSize[nsize]} ptr ${str}`;
+                    }
+                    argstr.push(str);
+                    break;
                 }
-            }
-            const size = args[i];
-            if (size !== undefined) {
-                const sizestr = OperationSize[size];
-                for (const j of ptridx) {
-                    argstr[j] = `${sizestr} ptr ${argstr[j]}`;
                 }
             }
             if (argstr.length === 0) return cmd;
@@ -2657,7 +3459,7 @@ export namespace asm
         toString():string {
             const out:string[] = [];
             for (const oper of this.operations) {
-                out.push(oper+'');
+                out.push(oper.toString());
             }
             return out.join('\n');
         }
@@ -2681,20 +3483,25 @@ export namespace asm
         return X64Assembler.load(bin);
     }
 
-    export function loadFromFile(src:string, defines?:Record<string, number>|null, reportDirect:boolean = false):X64Assembler{
+    export async function loadFromFile(src:string, defines?:Record<string, number>|null, reportDirect:boolean = false):Promise<X64Assembler>{
         const basename = src.substr(0, src.lastIndexOf('.')+1);
         const binpath = `${basename}bin`;
 
         let buffer:Uint8Array;
-        if (checkModified(src, binpath)){
-            buffer = asm.compile(fs.readFileSync(src, 'utf-8'), defines, reportDirect ? src : null);
-            fs.writeFileSync(binpath, buffer);
+        if (await fsutil.checkModified(src, binpath)){
+            buffer = asm.compile(await fsutil.readFile(src), defines, reportDirect ? src : null);
+            await fsutil.writeFile(binpath, buffer);
             console.log(`Please reload it`);
             process.exit(0);
         } else {
-            buffer = fs.readFileSync(binpath);
+            buffer = await fsutil.readFile(binpath, null);
         }
         return asm.load(buffer);
+    }
+
+    export function getRegisterName(register:Register, size:OperationSize|null|undefined):string {
+        if (size == null) size = OperationSize.qword;
+        return regnamemap[register | (size << 4)] || `invalid_R${register}_S${size}`;
     }
 }
 

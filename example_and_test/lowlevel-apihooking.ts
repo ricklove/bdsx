@@ -1,33 +1,69 @@
 
 // Low Level - API Hooking
-import { capi, RawTypeId } from "bdsx";
-import { BlockPos } from "bdsx/bds/blockpos";
-import { SurvivalMode } from "bdsx/bds/gamemode";
-import { TextPacket } from "bdsx/bds/packets";
-import { UNDNAME_NAME_ONLY } from "bdsx/common";
+import { Block } from "bdsx/bds/block";
+import { BlockPos, Vec3 } from "bdsx/bds/blockpos";
+import { GameMode, SurvivalMode } from "bdsx/bds/gamemode";
+import { ItemStack } from "bdsx/bds/inventory";
+import { ServerPlayer } from "bdsx/bds/player";
+import { Config } from "bdsx/config";
 import { pdb } from "bdsx/core";
+import { UNDNAME_NAME_ONLY } from "bdsx/dbghelp";
+import { makefunc } from "bdsx/makefunc";
+import { bool_t, int32_t, int8_t, uint32_t, void_t } from "bdsx/nativetype";
 import { ProcHacker } from "bdsx/prochacker";
 
-if (!capi.isRunningOnWine()) { // Skip for Linux, pdb is not working on Wine.
-    // the API hooking is possible on Wine with the generated cache.
+if (!Config.WINE) { // Skip for Linux, pdb searching is not working on Wine. but it's possible with the generated cache.
 
-    const hacker = ProcHacker.load('../pdbcache_by_example.ini', ['SurvivalMode::destroyBlock'], UNDNAME_NAME_ONLY);
+    //////////////////////////
+    // hook the block breaking
+    const hacker = ProcHacker.load('../pdbcache_by_example.ini', [
+        'SurvivalMode::destroyBlock',
+        'GameMode::useItemOn',
+        'MapItemSavedData::_updateTrackedEntityDecoration',
+        'BedrockLog::log',
+    ], UNDNAME_NAME_ONLY);
     pdb.close(); // close the pdb to reduce the resource usage.
 
     let halfMiss = false;
     function onDestroyBlock(gameMode:SurvivalMode, blockPos:BlockPos, v:number):boolean {
         halfMiss = !halfMiss;
-        const ni = gameMode.actor.getNetworkIdentifier();
-        const packet = TextPacket.create();
-        packet.message = `${halfMiss ? 'missed' : 'destroyed'}: ${blockPos.x} ${blockPos.y} ${blockPos.z} ${v}`;
-        packet.sendTo(ni);
-        packet.dispose();
+        const actor = gameMode.actor;
+        if (actor instanceof ServerPlayer) {
+            actor.sendMessage(`${halfMiss ? 'missed' : 'destroyed'}: ${blockPos.x} ${blockPos.y} ${blockPos.z} ${v}`);
+        }
 
         if (halfMiss) return false;
         return originalFunc(gameMode, blockPos, v);
     }
 
-    // bool SurvivalMode::destroyBlock(BlockPos&,unsigned char); // it can be dug with the disassembler.
-    const originalFunc = hacker.hooking('SurvivalMode::destroyBlock', RawTypeId.Boolean, null, SurvivalMode, BlockPos, RawTypeId.Int32)(onDestroyBlock);
-}
+    // bool SurvivalMode::destroyBlock(BlockPos&,unsigned char); // it can be dug with the disassembler or the decompiler.
+    const originalFunc = hacker.hooking('SurvivalMode::destroyBlock', bool_t, null, SurvivalMode, BlockPos, int32_t)(onDestroyBlock);
 
+    //////////////////////////
+    // hook the item using on block
+    const itemUseOn = hacker.hooking('GameMode::useItemOn',
+        bool_t, null, GameMode, ItemStack, BlockPos, int8_t, Vec3, Block)(
+        (gameMode, item, blockpos, n, pos, block)=>{
+
+        const actor = gameMode.actor;
+        if (actor instanceof ServerPlayer) {
+            actor.sendMessage(`${item.getName()} using at ${blockpos.x} ${blockpos.y} ${blockpos.z}`);
+        }
+        return itemUseOn(gameMode, item, blockpos, n, pos, block);
+    });
+
+    //////////////////////////
+    // hide the map marker
+    hacker.hooking('MapItemSavedData::_updateTrackedEntityDecoration', bool_t)(()=>false);
+
+
+    //////////////////////////
+    // Cross thread hooking
+    // it will synchronize the thread and call the JS engine.
+
+    // void BedrockLog::log(enum BedrockLog::LogCategory,class std::bitset<3>,enum BedrockLog::LogRule,enum LogAreaID,unsigned int,char const *,int,char const *,...)
+    hacker.hooking('BedrockLog::log', void_t, {crossThread: true}, int32_t, int32_t, int32_t, int32_t, uint32_t, makefunc.Utf8)(
+        (category, bitset, logrule, logarea, n, message)=>{
+        console.log(message);
+    });
+}

@@ -1,13 +1,12 @@
-import { AttributeId, bedrockServer } from "bdsx";
-import { connectionList } from "./net-login";
+import { AttributeId } from "bdsx/bds/attribute";
+import { serverInstance } from "bdsx/bds/server";
+import { events } from "bdsx/event";
 
 // Change attributes
 let healthCounter = 5;
 const interval = setInterval(()=>{
-    for (const ni of connectionList.keys()) {
-        const actor = ni.getActor();
-        if (!actor) continue;
-        actor.setAttribute(AttributeId.Health, healthCounter);
+    for (const player of serverInstance.getPlayers()) {
+        player.setAttribute(AttributeId.Health, healthCounter);
     }
 
     healthCounter ++;
@@ -15,6 +14,6 @@ const interval = setInterval(()=>{
 }, 100);
 
 // without this code, bdsx does not end even after BDS closed
-bedrockServer.close.on(()=>{
+events.serverStop.on(()=>{
     clearInterval(interval);
 });

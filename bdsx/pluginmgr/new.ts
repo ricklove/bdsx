@@ -1,19 +1,18 @@
 
+import * as child_process from 'child_process';
+import * as colors from 'colors';
+import * as fs from 'fs';
+import * as path from 'path';
+import { fsutil } from '../fsutil';
 
-import fs = require('fs');
-import path = require('path');
-import colors = require('colors');
-import child_process = require('child_process');
-import os = require('os');
-
-if (process.argv[2] === undefined) {
-    console.error(colors.red(`[BDSX-Plugins] Please provide the parameter for the target path`));
+if (process.argv[2] == null) {
+    console.error(colors.red(`[BDSX-Plugins] Please provide an argument for the target path of the new plugin`));
     process.exit(-1);
 }
 const targetPath = path.resolve(process.argv[2]);
 if (fs.existsSync(targetPath)) {
     console.error(colors.red(`[BDSX-Plugins] '${targetPath}' directory already exists`));
-    console.error(colors.red(`[BDSX-Plugins] Please execute it with the new path`));
+    console.error(colors.red(`[BDSX-Plugins] Please execute it with a new path`));
     process.exit(0);
 }
 
@@ -37,15 +36,15 @@ const targetdir = targetPath+path.sep;
 {
     const clsname = camelize(basename);
     const exampleSource = `
-import { bedrockServer } from "bdsx";
+import { events } from "bdsx/event";
 
 console.log('[plugin:${clsname}] allocated');
 
-bedrockServer.open.on(()=>{
+events.serverOpen.on(()=>{
     console.log('[plugin:${clsname}] launching');
 });
 
-bedrockServer.close.on(()=>{
+events.serverClose.on(()=>{
     console.log('[plugin:${clsname}] closed');
 });
 
@@ -55,7 +54,29 @@ bedrockServer.close.on(()=>{
 
 // package.json
 {
-    const bdsxPath = path.join(__dirname, '..');
+    const mainPackageJson = JSON.parse(fs.readFileSync('./package.json', 'utf-8'));
+    const bdsxPath = path.resolve('./bdsx');
+
+    const srcdeps = mainPackageJson.devDependencies;
+    const destdeps:Record<string, string> = {};
+    const inherites = [
+        '@types/node',
+        '@typescript-eslint/eslint-plugin',
+        '@typescript-eslint/parser',
+        'eslint',
+        'typescript',
+    ];
+
+    for (const dep of inherites) {
+        const version = srcdeps[dep];
+        if (version == null) {
+            console.error(colors.red(`[BDSX-Plugins] package.json/devDependencies does not have '${dep}'`));
+        } else {
+            destdeps[dep] = srcdeps[dep];
+        }
+    }
+    destdeps.bdsx = `file:${path.relative(targetPath, bdsxPath).replace(/\\/g, '/')}`;
+
     const examplejson = {
         "name": `@bdsx/${basename}`,
         "version": "1.0.0",
@@ -68,15 +89,11 @@ bedrockServer.close.on(()=>{
         "scripts": {
             "build": "tsc",
             "watch": "tsc -w",
-            "prepare": "tsc"
+            "prepare": "tsc || exit 0",
         },
-        "devDependencies": {
-            "bdsx": `file:${path.relative(targetPath, bdsxPath).replace(/\\/g, '/')}`,
-            "@types/node": "^12.20.5",
-            "typescript": "^4.2.3"
-        }
+        "devDependencies": destdeps,
     };
-    fs.writeFileSync(`${targetdir}package.json`, JSON.stringify(examplejson, null, 2).replace(/\n/g, os.EOL), 'utf-8');
+    fsutil.writeJsonSync(`${targetdir}package.json`, examplejson);
 }
 
 // tsconfig.json
@@ -84,7 +101,7 @@ bedrockServer.close.on(()=>{
     const tsconfig = JSON.parse(fs.readFileSync('./tsconfig.json', 'utf-8'));
     delete tsconfig.exclude;
     tsconfig.declaration = true;
-    fs.writeFileSync(`${targetdir}tsconfig.json`, JSON.stringify(tsconfig, null, 2).replace(/\n/g, os.EOL), 'utf-8');
+    fsutil.writeJsonSync(`${targetdir}tsconfig.json`, tsconfig);
 }
 
 // .npmignore
@@ -105,6 +122,32 @@ bedrockServer.close.on(()=>{
 *.d.ts
 `;
     fs.writeFileSync(`${targetdir}.gitignore`, gitignore, 'utf-8');
+}
+
+// .eslintrc.json
+{
+    const eslint = {
+        "root": true,
+        "parser": "@typescript-eslint/parser",
+        "parserOptions": {
+            "ecmaVersion": 2017,
+            "sourceType": "module",
+        },
+        "ignorePatterns": ["**/*.js"],
+        "plugins": [
+            "@typescript-eslint",
+            "import",
+        ],
+        "rules": {
+            "no-restricted-imports": ["error", {
+                "patterns": [{
+                    "group": ["**/bdsx/*", "!/bdsx/*"],
+                    "message": "Please use the absolute path for bdsx libraries.",
+                }],
+            }],
+        },
+    };
+    fsutil.writeJsonSync(`${targetdir}.eslintrc.json`, eslint);
 }
 
 // README.md

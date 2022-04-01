@@ -1,9 +1,9 @@
 import { capi } from "./capi";
 import { abstract } from "./common";
 import { StaticPointer, VoidPointer } from "./core";
-import { makefunc, RawTypeId } from "./makefunc";
+import { makefunc } from "./makefunc";
 import { nativeClass, NativeClass, NativeClassType, nativeField } from "./nativeclass";
-import { NativeType, Type, uint32_t } from "./nativetype";
+import { NativeType, Type, uint32_t, void_t } from "./nativetype";
 import { Singleton } from "./singleton";
 import { templateName } from "./templatename";
 
@@ -22,15 +22,15 @@ export class SharedPtrBase<T> extends NativeClass {
         this.weakRef = 1;
     }
     addRef():void {
-        this.interlockedIncrement32(8); // useRef
-        this.interlockedIncrement32(16); // weakRef
+        this.interlockedIncrement32(0x8); // useRef
+        this.interlockedIncrement32(0xc); // weakRef
     }
     release():void {
         if (this.interlockedDecrement32(0x8) === 0) {
             this._Destroy();
-        }
-        if (this.interlockedDecrement32(0xc) === 0) {
-            this._DeleteThis();
+            if (this.interlockedDecrement32(0xc) === 0) {
+                this._DeleteThis();
+            }
         }
     }
     _DeleteThis():void {
@@ -49,8 +49,8 @@ export class SharedPtrBase<T> extends NativeClass {
         });
     }
 }
-SharedPtrBase.prototype._Destroy = makefunc.js([0], RawTypeId.Void, {this:SharedPtrBase});
-SharedPtrBase.prototype._DeleteThis = makefunc.js([8], RawTypeId.Void, {this:SharedPtrBase});
+SharedPtrBase.prototype._Destroy = makefunc.js([0], void_t, {this:SharedPtrBase});
+SharedPtrBase.prototype._DeleteThis = makefunc.js([8], void_t, {this:SharedPtrBase});
 const sizeOfSharedPtrBase = SharedPtrBase[NativeType.size];
 
 /**
@@ -115,7 +115,7 @@ export abstract class SharedPtr<T extends NativeClass> extends NativeClass {
     }
     abstract create(vftable:VoidPointer):void;
 
-    static make<T extends NativeClass>(cls:{new():T}):NativeClassType<SharedPtr<T>> {
+    static make<T extends NativeClass>(cls:new()=>T):NativeClassType<SharedPtr<T>> {
         const clazz = cls as NativeClassType<T>;
         return Singleton.newInstance(SharedPtr, cls, ()=>{
             const Base = SharedPtrBase.make(clazz);
@@ -137,22 +137,5 @@ export abstract class SharedPtr<T extends NativeClass> extends NativeClass {
 
             return TypedSharedPtr as any;
         });
-    }
-}
-
-/**
- * @deprecated
- */
-export class SharedPointer extends StaticPointer {
-    constructor(private readonly sharedptr:SharedPtr<any>) {
-        super(sharedptr.p);
-    }
-
-    assignTo(dest:StaticPointer):void {
-        this.assignTo(dest);
-    }
-
-    dispose():void {
-        this.sharedptr.dispose();
     }
 }

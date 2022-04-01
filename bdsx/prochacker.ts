@@ -1,12 +1,14 @@
 import { asm, FloatRegister, Register, X64Assembler } from "./assembler";
-import { NativePointer, pdb, StaticPointer, VoidPointer } from "./core";
+import { Config } from "./config";
+import { bedrock_server_exe, NativePointer, pdb, StaticPointer, VoidPointer } from "./core";
 import { disasm } from "./disassembler";
 import { dll } from "./dll";
+import { fsutil } from "./fsutil";
 import { hacktool } from "./hacktool";
 import { FunctionFromTypes_js, FunctionFromTypes_np, makefunc, MakeFuncOptions, ParamType } from "./makefunc";
 import { MemoryUnlocker } from "./unlocker";
 import { hex, memdiff, memdiff_contains } from "./util";
-import colors = require('colors');
+import * as colors from 'colors';
 
 const FREE_REGS:Register[] = [
     Register.rax,
@@ -33,7 +35,7 @@ class AsmMover extends X64Assembler {
     asmFromOrigin(oper:asm.Operation):void {
         const splits = oper.splits;
         const basename = splits[0];
-        let ripDependedParam:asm.ParameterRegisterPointer|null = null;
+        let ripDependedParam:asm.ParameterRegisterPointer|asm.ParameterRegisterRegisterPointer|asm.ParameterFarPointer|null = null;
         const params = oper.parameters();
         for (const info of params) {
             switch (info.type) {
@@ -41,10 +43,15 @@ class AsmMover extends X64Assembler {
                 this.freeregs.delete(info.register);
                 break;
             case 'rp':
+            case 'fp':
                 this.freeregs.delete(info.register);
                 if (info.register === Register.rip) {
                     ripDependedParam = info;
                 }
+                break;
+            case 'rrp':
+                this.freeregs.delete(info.register);
+                this.freeregs.delete(info.register2);
                 break;
             }
         }
@@ -85,11 +92,41 @@ class AsmMover extends X64Assembler {
         this.inpos += oper.size;
     }
 
+    moveCode(codes:asm.Operations, key:keyof any, required:number):void {
+        let ended = false;
+        for (const oper of codes.operations) {
+            const basename = oper.splits[0];
+            if (ended) {
+                if (oper.code === asm.code.nop || oper.code === asm.code.int3) {
+                    continue;
+                }
+                throw Error(`Failed to hook ${String(key)}, Too small area to patch, require=${required}, actual=${this.inpos}`);
+            }
+            if (basename === 'ret' || basename === 'jmp' || basename === 'call') {
+                ended = true;
+            }
+            this.asmFromOrigin(oper);
+        }
+    }
+
     end():void {
         const tmpreg = this.getUnusing();
         const originend = this.origin.add(this.codesize);
         if (tmpreg != null) this.jmp64(originend, tmpreg);
         else this.jmp64_notemp(originend);
+    }
+}
+
+class SavedCode {
+    constructor(private buffer:Uint8Array, private readonly ptr:StaticPointer) {
+    }
+
+    restore():void {
+        const unlock = new MemoryUnlocker(this.ptr, this.buffer.length);
+        const oribuf = this.ptr.getBuffer(this.buffer.length);
+        this.ptr.setBuffer(this.buffer);
+        this.buffer = oribuf;
+        unlock.done();
     }
 }
 
@@ -102,8 +139,8 @@ export class ProcHacker<T extends Record<string, NativePointer>> {
 
     append<NT extends Record<string, NativePointer>>(nmap:NT):ProcHacker<T&NT> {
         const map = this.map as any;
-        for (const key in nmap) {
-            map[key] = nmap[key];
+        for (const [key, v] of Object.entries(nmap)) {
+            map[key] = v;
         }
         return this as any;
     }
@@ -120,10 +157,10 @@ export class ProcHacker<T extends Record<string, NativePointer>> {
         const buffer = ptr.getBuffer(originalCode.length);
         const diff = memdiff(buffer, originalCode);
         if (!memdiff_contains(ignoreArea, diff)) {
-            console.error(colors.red(`${subject}: ${key}+0x${offset.toString(16)}: code unmatch`));
+            console.error(colors.red(`${subject}: ${key}+0x${offset.toString(16)}: code does not match`));
             console.error(colors.red(`[${hex(buffer)}] != [${hex(originalCode)}]`));
             console.error(colors.red(`diff: ${JSON.stringify(diff)}`));
-            console.error(colors.red(`${subject}: skip `));
+            console.error(colors.red(`${subject}: skip`));
             return false;
         } else {
             return true;
@@ -138,11 +175,12 @@ export class ProcHacker<T extends Record<string, NativePointer>> {
      * @param ignoreArea pair offsets to ignore of originalCode
      */
     nopping(subject:string, key:keyof T, offset:number, originalCode:number[], ignoreArea:number[]):void {
-        const ptr = this.map[key].add(offset);
+        let ptr:StaticPointer = this.map[key];
         if (!ptr) {
-            console.error(colors.red(`${subject}: skip, ${key} symbol not found`));
+            console.error(colors.red(`${subject}: skip, symbol "${key}" not found`));
             return;
         }
+        ptr = ptr.add(offset);
         const size = originalCode.length;
         const unlock = new MemoryUnlocker(ptr, size);
         if (this.check(subject, key, offset, ptr, originalCode, ignoreArea)) {
@@ -155,28 +193,37 @@ export class ProcHacker<T extends Record<string, NativePointer>> {
      * @param key target symbol name
      * @param to call address
      */
-    hookingRaw(key:keyof T, to: VoidPointer):VoidPointer {
+    hookingRaw(key:keyof T, to: VoidPointer|((original:VoidPointer)=>VoidPointer), opts?:disasm.Options|null):VoidPointer {
         const origin = this.map[key];
-        if (!origin) throw Error(`${key} symbol not found`);
+        if (!origin) throw Error(`Symbol ${String(key)} not found`);
 
         const REQUIRE_SIZE = 12;
-        const codes = disasm.process(origin, REQUIRE_SIZE);
+        const codes = disasm.process(origin, REQUIRE_SIZE, opts);
+        if (codes.size === 0) throw Error(`Failed to disassemble`);
         const out = new AsmMover(origin, codes.size);
-        for (const oper of codes.operations) {
-            const basename = oper.splits[0];
-            if (basename === 'ret' || basename === 'jmp' || basename === 'call') {
-                throw Error(`Too small area to patch, require=${REQUIRE_SIZE}, actual=${out.inpos}`);
-            }
-            out.asmFromOrigin(oper);
-        }
+        out.moveCode(codes, key, REQUIRE_SIZE);
         out.end();
-        const original = out.alloc();
+        const original = out.alloc(key+' (moved original)');
 
         const unlock = new MemoryUnlocker(origin, codes.size);
-        hacktool.jump(origin, to, Register.rax, codes.size);
-        unlock.done();
-
+        try {
+            if (to instanceof Function) to = to(original);
+            hacktool.jump(origin, to, Register.rax, codes.size);
+        } finally {
+            unlock.done();
+        }
         return original;
+    }
+
+    /**
+     * @param key target symbol name
+     */
+    hookingRawWithOriginal(key:keyof T, opts?:disasm.Options|null): (callback: (asm: X64Assembler, original: VoidPointer) => void) => VoidPointer {
+        return callback => this.hookingRaw(key, original=>{
+            const data = asm();
+            callback(data, original);
+            return data.alloc('hook of '+key);
+        }, opts);
     }
 
     /**
@@ -185,27 +232,22 @@ export class ProcHacker<T extends Record<string, NativePointer>> {
      */
     hookingRawWithCallOriginal(key:keyof T, to: VoidPointer,
         keepRegister:Register[],
-        keepFloatRegister:FloatRegister[]):void {
+        keepFloatRegister:FloatRegister[],
+        opts:disasm.Options={}):void {
         const origin = this.map[key];
-        if (!origin) throw Error(`${key} symbol not found`);
+        if (origin == null) throw Error(`Symbol ${String(key)} not found`);
 
         const REQUIRE_SIZE = 12;
-        const codes = disasm.process(origin, REQUIRE_SIZE);
+        const codes = disasm.process(origin, REQUIRE_SIZE, opts);
         const out = new AsmMover(origin, codes.size);
         for (const reg of keepRegister) {
             out.freeregs.add(reg);
         }
         out.saveAndCall(to, keepRegister, keepFloatRegister);
-        for (const oper of codes.operations) {
-            const basename = oper.splits[0];
-            if (basename === 'ret' ||  basename === 'jmp' || basename === 'call') {
-                throw Error(`Too small area to patch, require=${REQUIRE_SIZE}, actual=${out.inpos}`);
-            }
-            out.asmFromOrigin(oper);
-        }
+        out.moveCode(codes, key, REQUIRE_SIZE);
         out.end();
         const unlock = new MemoryUnlocker(origin, codes.size);
-        hacktool.jump(origin, out.alloc(), Register.rax, codes.size);
+        hacktool.jump(origin, out.alloc('hook of '+key), Register.rax, codes.size);
         unlock.done();
     }
 
@@ -213,15 +255,24 @@ export class ProcHacker<T extends Record<string, NativePointer>> {
      * @param key target symbol name
      * @param to call address
      */
-    hooking<OPTS extends MakeFuncOptions<any>|null, RETURN extends ParamType, PARAMS extends ParamType[]>(
+    hooking<OPTS extends (MakeFuncOptions<any>&disasm.Options)|null, RETURN extends ParamType, PARAMS extends ParamType[]>(
         key:keyof T,
         returnType:RETURN,
         opts?: OPTS,
         ...params: PARAMS):
         (callback: FunctionFromTypes_np<OPTS, PARAMS, RETURN>)=>FunctionFromTypes_js<VoidPointer, OPTS, PARAMS, RETURN> {
         return callback=>{
-            const to = makefunc.np(callback, returnType, opts, ...params);
-            return makefunc.js(this.hookingRaw(key, to), returnType, opts, ...params);
+            if (opts == null) {
+                opts = {name:`hook of ${key}`} as OPTS;
+            } else if (opts.name == null) {
+                opts.name = `hook of ${key}`;
+            }
+            const original = this.hookingRaw(key, original=>{
+                const nopts:MakeFuncOptions<any> = opts! || {};
+                if (nopts.onError == null) nopts.onError = original;
+                return makefunc.np(callback, returnType, nopts as any, ...params);
+            }, opts);
+            return makefunc.js(original, returnType, opts, ...params);
         };
     }
 
@@ -237,8 +288,8 @@ export class ProcHacker<T extends Record<string, NativePointer>> {
      */
     patching(subject:string, key:keyof T, offset:number, newCode:VoidPointer, tempRegister:Register, call:boolean, originalCode:number[], ignoreArea:number[]):void {
         let ptr:NativePointer = this.map[key];
-        if (!ptr) {
-            console.error(colors.red(`${subject}: skip, ${key} symbol not found`));
+        if (ptr == null) {
+            console.error(colors.red(`${subject}: skip, symbol "${key}" not found`));
             return;
         }
         ptr = ptr.add(offset);
@@ -265,8 +316,8 @@ export class ProcHacker<T extends Record<string, NativePointer>> {
      */
     jumping(subject:string, key:keyof T, offset:number, jumpTo:VoidPointer, tempRegister:Register, originalCode:number[], ignoreArea:number[]):void {
         let ptr:NativePointer = this.map[key];
-        if (!ptr) {
-            console.error(colors.red(`${subject}: skip, ${key} symbol not found`));
+        if (ptr == null) {
+            console.error(colors.red(`${subject}: skip, symbol "${key}" not found`));
             return;
         }
         ptr = ptr.add(offset);
@@ -278,14 +329,14 @@ export class ProcHacker<T extends Record<string, NativePointer>> {
         unlock.done();
     }
 
-    write(key:keyof T, offset:number, asm:X64Assembler, subject?:string, originalCode?:number[], ignoreArea?:number[]):void {
-        const buffer = asm.buffer();
+    write(key:keyof T, offset:number, asm:X64Assembler|Uint8Array, subject?:string, originalCode?:number[], ignoreArea?:number[]):void {
+        const buffer = asm instanceof Uint8Array ? asm : asm.buffer();
         const ptr = this.map[key].add(offset);
         const unlock = new MemoryUnlocker(ptr, buffer.length);
         if (originalCode) {
             if (subject == null) subject = key+'';
             if (originalCode.length < buffer.length) {
-                console.error(colors.red(`${subject}: ${key}+0x${offset.toString(16)}: writing area is too small`));
+                console.error(colors.red(`${subject}: ${key}+0x${offset.toString(16)}: writing space is too small`));
                 unlock.done();
                 return;
             }
@@ -301,14 +352,22 @@ export class ProcHacker<T extends Record<string, NativePointer>> {
         unlock.done();
     }
 
+    saveAndWrite(key:keyof T, offset:number, asm:X64Assembler|Uint8Array):SavedCode {
+        const buffer = asm instanceof Uint8Array ? asm : asm.buffer();
+        const ptr = this.map[key].add(offset);
+        const code = new SavedCode(buffer, ptr);
+        code.restore();
+        return code;
+    }
+
     /**
      * make the native function as a JS function.
      *
      * wrapper codes are not deleted permanently.
      * do not use it dynamically.
      *
-     * @param returnType RawTypeId or *Pointer
-     * @param params RawTypeId or *Pointer
+     * @param returnType *_t or *Pointer
+     * @param params *_t or *Pointer
      */
     js<OPTS extends MakeFuncOptions<any>|null, RETURN extends ParamType, PARAMS extends ParamType[]>(
         key: keyof T,
@@ -325,6 +384,22 @@ export class ProcHacker<T extends Record<string, NativePointer>> {
      * @param undecorate if it's set with UNDNAME_*, it uses undecorated(demangled) symbols
      */
     static load<KEY extends string, KEYS extends readonly [...KEY[]]>(cacheFilePath:string, names:KEYS, undecorate?:number):ProcHacker<{[key in KEYS[number]]: NativePointer}> {
+        if (Config.WINE) {
+            let matched = false;
+            try {
+                const firstLine = fsutil.readFirstLineSync(cacheFilePath);
+                matched = firstLine === bedrock_server_exe.md5;
+            } catch (err) {
+                if (err.code === 'ENOENT') {
+                    // not found
+                } else {
+                    throw err;
+                }
+            }
+            if (!matched) {
+                console.error(colors.yellow('[BDSX] PDB cache may not be generated on Linux. Please generate it on Windows and copy the file to the Linux machine'));
+            }
+        }
         return new ProcHacker(pdb.getList(cacheFilePath, {}, names, false, undecorate));
     }
 }

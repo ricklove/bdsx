@@ -1,7 +1,7 @@
 import { remapAndPrintError } from "../source-map-support";
 
 try {
-    require('./parse');
+    import('./symbolwriter');
 } catch (err) {
     remapAndPrintError(err);
 }

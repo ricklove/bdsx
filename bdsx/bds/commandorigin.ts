@@ -1,17 +1,40 @@
-import { BlockPos, Vec3 } from "bdsx/bds/blockpos";
-import { abstract } from "bdsx/common";
-import { VoidPointer } from "bdsx/core";
-import { mce } from "bdsx/mce";
-import { nativeClass, NativeClass, nativeField } from "bdsx/nativeclass";
-import { makefunc, RawTypeId } from "../makefunc";
-import { CxxStringWrapper } from "../pointer";
+import { BlockPos, Vec3 } from "../bds/blockpos";
+import { capi } from "../capi";
+import { abstract } from "../common";
+import { VoidPointer } from "../core";
+import { makefunc } from "../makefunc";
+import { mce } from "../mce";
+import { AbstractClass, nativeClass, nativeField } from "../nativeclass";
+import { CxxString, int32_t, NativeType, uint8_t, void_t } from "../nativetype";
 import { Actor } from "./actor";
+import type { CommandPositionFloat } from "./command";
+import { JsonValue } from "./connreq";
 import { Dimension } from "./dimension";
 import { Level, ServerLevel } from "./level";
+import { CompoundTag } from "./nbt";
+import { procHacker } from "./proc";
 import { proc } from "./symbols";
 
+export enum CommandOriginType {
+    Player,
+    CommandBlock,
+    MinecartCommandBlock,
+    DevConsole,
+    Test,
+    AutomationPlayer,
+    ClientAutomation,
+    Server,
+    Entity,
+    Virtual,
+    GameArgument,
+    EntityServer,
+    Precompiled,
+    GameMasterEntityServer,
+    Scripting,
+}
+
 @nativeClass(null)
-export class CommandOrigin extends NativeClass {
+export class CommandOrigin extends AbstractClass {
     @nativeField(VoidPointer)
     vftable:VoidPointer;
     @nativeField(mce.UUID)
@@ -28,24 +51,18 @@ export class CommandOrigin extends NativeClass {
     isServerCommandOrigin():boolean {
         return this.vftable.equals(ServerCommandOrigin_vftable);
     }
+    isScriptCommandOrigin():boolean {
+        return this.vftable.equals(ScriptCommandOrigin_vftable);
+    }
 
-    /**
-     * @deprecated use cmdorigin.destruct();
-     */
-    destructor():void {
+    getRequestId():CxxString {
         abstract();
     }
-    getRequestId():string {
-        const p = getRequestId.call(this) as CxxStringWrapper;
-        const str = p.value;
-        p.destruct();
-        return str;
-    }
+    /**
+     * @remarks Do not call this the second time, assign it to a variable when calling this
+     */
     getName():string {
-        const p = getName.call(this) as CxxStringWrapper;
-        const str = p.value;
-        p.destruct();
-        return str;
+        abstract();
     }
     getBlockPosition(): BlockPos {
         abstract();
@@ -56,17 +73,81 @@ export class CommandOrigin extends NativeClass {
     getLevel(): Level {
         abstract();
     }
+    getOriginType():CommandOriginType {
+        abstract();
+    }
+
+    /**
+     * Returns the dimension of the recieved command
+     */
     getDimension(): Dimension {
         abstract();
     }
-    getEntity():Actor {
+    /**
+     * Returns the entity that send the command
+     * @remarks Null if the command origin is the console
+     */
+    getEntity():Actor|null {
         abstract();
+    }
+
+    /**
+     * return the command result
+     */
+    handleCommandOutputCallback(value:unknown & IExecuteCommandCallback['data']):void {
+        const v = capi.malloc(JsonValue[NativeType.size]).as(JsonValue);
+        v.constructWith(value);
+        handleCommandOutputCallback.call(this, v);
+        v.destruct();
+        capi.free(v);
+    }
+
+    /**
+     * @param tag this function stores nbt values to this parameter
+     */
+    save(tag:CompoundTag):boolean;
+     /**
+      * it returns JS converted NBT
+      */
+    save():Record<string, any>;
+    save(tag?:CompoundTag):any{
+        abstract();
+    }
+    allocateAndSave():CompoundTag{
+        const tag = CompoundTag.allocate();
+        this.save(tag);
+        return tag;
     }
 }
 
 @nativeClass(null)
 export class PlayerCommandOrigin extends CommandOrigin {
     // Actor*(*getEntity)(CommandOrigin* origin);
+}
+
+@nativeClass(0x28)
+export class ActorCommandOrigin extends CommandOrigin {
+    // Actor*(*getEntity)(CommandOrigin* origin);
+
+    static constructWith(actor:Actor):ActorCommandOrigin {
+        const origin = new ActorCommandOrigin(true);
+        ActorCommandOrigin$ActorCommandOrigin(origin, actor);
+        return origin;
+    }
+    static allocateWith(actor:Actor):ActorCommandOrigin {
+        const origin = capi.malloc(ActorCommandOrigin[NativeType.size]).as(ActorCommandOrigin);
+        ActorCommandOrigin$ActorCommandOrigin(origin, actor);
+        return origin;
+    }
+}
+
+const ActorCommandOrigin$ActorCommandOrigin = procHacker.js("ActorCommandOrigin::ActorCommandOrigin", void_t, null, ActorCommandOrigin, Actor);
+
+@nativeClass(0x50)
+export class VirtualCommandOrigin extends CommandOrigin {
+    static allocateWith(origin:CommandOrigin, actor:Actor, cmdPos:CommandPositionFloat):VirtualCommandOrigin {
+        abstract();
+    }
 }
 
 @nativeClass(null)
@@ -79,32 +160,72 @@ export class ScriptCommandOrigin extends PlayerCommandOrigin {
     // VFTable* vftable;
 }
 
-@nativeClass(0x58)
+const ScriptCommandOrigin_vftable = proc["ScriptCommandOrigin::`vftable'"];
+
+@nativeClass(0x48)
 export class ServerCommandOrigin extends CommandOrigin {
+    static constructWith(name:string, level:ServerLevel, permissionLevel:number, dimension:Dimension|null):ServerCommandOrigin {
+        const ptr = new ServerCommandOrigin(true);
+        ServerCommandOrigin$ServerCommandOrigin(ptr, name, level, permissionLevel, dimension);
+        return ptr;
+    }
+    static allocateWith(name:string, level:ServerLevel, permissionLevel:number, dimension:Dimension|null):ServerCommandOrigin {
+        const ptr = capi.malloc(ServerCommandOrigin[NativeType.size]).as(ServerCommandOrigin);
+        ServerCommandOrigin$ServerCommandOrigin(ptr, name, level, permissionLevel, dimension);
+        return ptr;
+    }
 }
 
+const ServerCommandOrigin$ServerCommandOrigin = procHacker.js('ServerCommandOrigin::ServerCommandOrigin', void_t, null, ServerCommandOrigin,
+    CxxString, ServerLevel, int32_t, Dimension);
 const ServerCommandOrigin_vftable = proc["ServerCommandOrigin::`vftable'"];
 
-// void destruct(CommandOrigin* origin);
-CommandOrigin.prototype.destruct = makefunc.js([0x00], RawTypeId.Void, {this: CommandOrigin});
+// void CommandOrigin::destruct();
+CommandOrigin.prototype.destruct = makefunc.js([0x00], void_t, {this: CommandOrigin});
 
-// std::string CommandOrigin::getRequestId();
-const getRequestId = makefunc.js([0x08], CxxStringWrapper, {this: CommandOrigin, structureReturn: true});
+// std::string& CommandOrigin::getRequestId();
+CommandOrigin.prototype.getRequestId = makefunc.js([0x08], CxxString, {this: CommandOrigin});
 
 // std::string CommandOrigin::getName();
-const getName = makefunc.js([0x10], CxxStringWrapper, {this: CommandOrigin, structureReturn: true});
+CommandOrigin.prototype.getName = makefunc.js([0x10], CxxString, {this: CommandOrigin, structureReturn: true});
 
 // BlockPos CommandOrigin::getBlockPosition();
 CommandOrigin.prototype.getBlockPosition = makefunc.js([0x18], BlockPos, {this: CommandOrigin, structureReturn: true});
 
-// Vec3 getWorldPosition(CommandOrigin* origin);
+// Vec3 CommandOrigin::getWorldPosition();
 CommandOrigin.prototype.getWorldPosition = makefunc.js([0x20], Vec3, {this: CommandOrigin, structureReturn: true});
 
-// Level* getLevel(CommandOrigin* origin);
-CommandOrigin.prototype.getLevel = makefunc.js([0x28], Level, {this: CommandOrigin});
+// std::optional<Vec2> CommandOrigin::getRotation();
 
-// Dimension* (*getDimension)(CommandOrigin* origin);
-CommandOrigin.prototype.getDimension = makefunc.js([0x30], Dimension, {this: CommandOrigin});
+// Level* CommandOrigin::getLevel();
+CommandOrigin.prototype.getLevel = makefunc.js([0x30], Level, {this: CommandOrigin});
 
-// Actor* getEntity(CommandOrigin* origin);
-CommandOrigin.prototype.getEntity = makefunc.js([0x38], Actor, {this: CommandOrigin});
+// Dimension* (*CommandOrigin::getDimension)();
+CommandOrigin.prototype.getDimension = makefunc.js([0x38], Dimension, {this: CommandOrigin});
+
+// Actor* CommandOrigin::getEntity();
+CommandOrigin.prototype.getEntity = makefunc.js([0x40], Actor, {this: CommandOrigin});
+
+// enum CommandOriginType CommandOrigin::getOriginType();
+CommandOrigin.prototype.getOriginType = makefunc.js([0xb8], uint8_t, {this: CommandOrigin});
+
+// void handleCommandOutputCallback(Json::Value &&);
+const handleCommandOutputCallback = makefunc.js([0xc0], void_t, {this: CommandOrigin}, JsonValue);
+
+// struct CompoundTag CommandOrigin::serialize(void)
+const serializeCommandOrigin = makefunc.js([0xe8], CompoundTag, {this:CommandOrigin}, CompoundTag);
+CommandOrigin.prototype.save = function(tag?:CompoundTag):any {
+    if (tag != null) {
+        return serializeCommandOrigin.call(this, tag);
+    }
+    tag = CompoundTag.allocate();
+    if (!serializeCommandOrigin.call(this, tag)) return null;
+    const res = tag.value();
+    tag.dispose();
+    return res;
+};
+
+const deleteServerCommandOrigin = makefunc.js([0, 0], void_t, {this:ServerCommandOrigin}, int32_t);
+ServerCommandOrigin.prototype[NativeType.dtor] = function() {
+    deleteServerCommandOrigin.call(this, 1);
+};

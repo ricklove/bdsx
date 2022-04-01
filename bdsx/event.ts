@@ -1,266 +1,323 @@
-import { Actor, MinecraftPacketIds, NativePointer, nethook, RawTypeId, serverInstance } from "bdsx";
-import { Block, BlockSource } from "bdsx/bds/block";
-import { BlockPos } from "bdsx/bds/blockpos";
-import { GameMode, SurvivalMode } from "bdsx/bds/gamemode";
-import { ItemStack } from "bdsx/bds/inventory";
-import { Player } from "bdsx/bds/player";
-import { procHacker } from "bdsx/bds/proc";
-import { CANCEL } from "bdsx/common";
-import { VoidPointer } from "bdsx/core";
-import { CxxStringWrapper } from "./pointer";
-import { bin64_t } from "./nativetype";
-import { AttributeId } from "./bds/attribute";
-import Event from "krevent";
-import { ScriptCustomEventPacket } from "./bds/packets";
+import { Color } from "colors";
+import { asmcode } from "./asm/asmcode";
+import type { CommandContext } from "./bds/command";
+import type { NetworkIdentifier } from "./bds/networkidentifier";
+import { MinecraftPacketIds } from "./bds/packetids";
+import { CANCEL } from "./common";
+import { Event, EventEx } from "./eventtarget";
+import type { BlockDestroyEvent, BlockDestructionStartEvent, BlockInteractedWithEvent, BlockPlaceEvent, ButtonPressEvent, CampfireTryDouseFire, CampfireTryLightFire, ChestOpenEvent, ChestPairEvent, FarmlandDecayEvent, PistonMoveEvent } from "./event_impl/blockevent";
+import type { EntityCreatedEvent, EntityDieEvent, EntityHeathChangeEvent, EntityHurtEvent, EntitySneakEvent, EntityStartRidingEvent, EntityStartSwimmingEvent, EntityStopRidingEvent, ItemUseEvent, ItemUseOnBlockEvent, PlayerAttackEvent, PlayerCritEvent, PlayerDropItemEvent, PlayerInventoryChangeEvent, PlayerJoinEvent, PlayerJumpEvent, PlayerLeftEvent, PlayerLevelUpEvent, PlayerPickupItemEvent, PlayerRespawnEvent, PlayerSleepInBedEvent, PlayerUseItemEvent, ProjectileShootEvent, SplashPotionHitEvent } from "./event_impl/entityevent";
+import type { LevelExplodeEvent, LevelSaveEvent, LevelTickEvent, LevelWeatherChangeEvent } from "./event_impl/levelevent";
+import type { ObjectiveCreateEvent, QueryRegenerateEvent, ScoreAddEvent, ScoreRemoveEvent, ScoreResetEvent, ScoreSetEvent } from "./event_impl/miscevent";
+import type { nethook } from "./nethook";
+import { remapStack } from "./source-map-support";
 
-interface IBlockDestroyEvent {
-    player: Player;
-    blockPos: BlockPos;
-}
-class BlockDestroyEvent implements IBlockDestroyEvent {
-    constructor(
-        public player: Player,
-        public blockPos: BlockPos,
-    ) {
-    }
-}
-function onBlockDestroy(survivalMode:SurvivalMode, blockPos:BlockPos, v:number):boolean {
-    const event = new BlockDestroyEvent(survivalMode.actor as Player, blockPos);
-    if (events.blockDestroy.fire(event) === CANCEL) {
-        return false;
-    } else {
-        survivalMode.actor = event.player;
-        return _onBlockDestroy(survivalMode, event.blockPos, v);
-    }
-}
-function onBlockDestroyCreative(gameMode:GameMode, blockPos:BlockPos, v:number):boolean {
-    const event = new BlockDestroyEvent(gameMode.actor as Player, blockPos);
-    if (events.blockDestroy.fire(event) === CANCEL) {
-        return false;
-    } else {
-        gameMode.actor = event.player;
-        return _onBlockDestroyCreative(gameMode, event.blockPos, v);
-    }
-}
-const _onBlockDestroy = procHacker.hooking("SurvivalMode::destroyBlock", RawTypeId.Boolean, null, SurvivalMode, BlockPos, RawTypeId.Int32)(onBlockDestroy);
-const _onBlockDestroyCreative = procHacker.hooking("GameMode::_creativeDestroyBlock", RawTypeId.Boolean, null, SurvivalMode, BlockPos, RawTypeId.Int32)(onBlockDestroyCreative);
+const PACKET_ID_COUNT = 0x100;
+const PACKET_EVENT_COUNT = 0x500;
 
-interface IEntitySneakEvent {
-    entity: Actor;
-    isSneaking: boolean;
-}
-class entitySneakEvent implements IEntitySneakEvent {
-    constructor(
-        public entity: Actor,
-        public isSneaking: boolean,
-    ) {
+asmcode.addressof_enabledPacket.fill(0, 256);
+
+class PacketEvent extends EventEx<(...args:any[])=>(CANCEL|void)> {
+    constructor(public readonly id:number) {
+        super();
+    }
+
+    onStarted():void {
+        const v = asmcode.getEnabledPacket(this.id);
+        asmcode.setEnabledPacket(v+1, this.id);
+    }
+
+    onCleared():void {
+        const v = asmcode.getEnabledPacket(this.id);
+        asmcode.setEnabledPacket(v-1, this.id);
     }
 }
 
-function onEntitySneak(Script:ScriptCustomEventPacket,actor:Actor, bool:boolean):boolean {
-    const event = new entitySneakEvent(actor, bool);
-    events.entitySneak.fire(event);
-    return _onEntitySneak(Script, actor, bool);
+function getNetEventTarget(type:events.PacketEventType, packetId:MinecraftPacketIds):PacketEvent {
+    if ((packetId>>>0) >= PACKET_ID_COUNT) {
+        throw Error(`Out of range: packetId < 0x100 (packetId=${packetId})`);
+    }
+    const id = type*PACKET_ID_COUNT + packetId;
+    let target = packetAllTargets[id];
+    if (target !== null) return target;
+    packetAllTargets[id] = target = new PacketEvent(packetId);
+    return target;
+}
+const packetAllTargets = new Array<PacketEvent|null>(PACKET_EVENT_COUNT);
+for (let i=0;i<PACKET_EVENT_COUNT;i++) {
+    packetAllTargets[i] = null;
 }
 
-const _onEntitySneak = procHacker.hooking('ScriptServerActorEventListener::onActorSneakChanged', RawTypeId.Boolean, null, ScriptCustomEventPacket, Actor, RawTypeId.Boolean)(onEntitySneak);
+export namespace events {
 
-interface IBlockPlaceEvent {
-    player: Player,
-    block: Block,
-    blockSource: BlockSource,
-    blockPos: BlockPos;
-}
-class BlockPlaceEvent implements IBlockPlaceEvent {
-    constructor(
-        public player: Player,
-        public block: Block,
-        public blockSource: BlockSource,
-        public blockPos: BlockPos,
-    ) {
-    }
-}
-function onBlockPlace(blockSource:BlockSource, block:Block, blockPos:BlockPos, v1:number, actor:Actor, v2:boolean):boolean {
-    const event = new BlockPlaceEvent(actor as Player, block, blockSource, blockPos);
-    if (events.blockPlace.fire(event) === CANCEL) {
-        return false;
-    } else {
-        return _onBlockPlace(event.blockSource, event.block, event.blockPos, v1, event.player, v2);
-    }
-}
-const _onBlockPlace = procHacker.hooking("BlockSource::mayPlace", RawTypeId.Boolean, null, BlockSource, Block, BlockPos, RawTypeId.Int32, Actor, RawTypeId.Boolean)(onBlockPlace);
+    ////////////////////////////////////////////////////////
+    // Block events
 
-interface IEntityHurtEvent {
-    entity: Actor;
-    damage: number;
-}
-class EntityHurtEvent implements IEntityHurtEvent {
-    constructor(
-        public entity: Actor,
-        public damage: number,
-    ) {
-    }
-}
-function onEntityHurt(entity: Actor, actorDamageSource: VoidPointer, damage: number, v1: boolean, v2: boolean):boolean {
-    const event = new EntityHurtEvent(entity, damage);
-    if (events.entityHurt.fire(event) === CANCEL) {
-        return false;
-    } else {
-        return _onEntityHurt(event.entity, actorDamageSource, event.damage, v1, v2);
-    }
-}
-const _onEntityHurt = procHacker.hooking("Actor::hurt", RawTypeId.Boolean, null, Actor, VoidPointer, RawTypeId.Int32, RawTypeId.Boolean, RawTypeId.Boolean)(onEntityHurt);
+    /** Cancellable */
+    export const blockDestroy = new Event<(event: BlockDestroyEvent) => void | CANCEL>();
+    /** Not cancellable */
+    export const blockDestructionStart = new Event<(event: BlockDestructionStartEvent) => void>();
+    /** Cancellable */
+    export const blockPlace = new Event<(event: BlockPlaceEvent) => void | CANCEL>();
+    /** Not cancellable */
+    export const pistonMove = new Event<(event: PistonMoveEvent) => void>();
+    /** Cancellable */
+    export const farmlandDecay = new Event<(event: FarmlandDecayEvent) => void | CANCEL>();
 
-interface IEntityHealEvent {
-    entity: Actor;
-    readonly damage: number;
-}
-class EntityHealEvent implements IEntityHealEvent {
-    constructor(
-        public entity: Actor,
-        readonly damage: number,
-    ) {
+    /** Cancellable but requires additional stimulation */
+    export const campfireLight = new Event<(event: CampfireTryLightFire) => void | CANCEL>();
+    /** Cancellable but requires additional stimulation */
+    export const campfireDouse = new Event<(event: CampfireTryDouseFire) => void | CANCEL>();
+    /** Cancellable but the client will have the motion and sound*/
+    export const buttonPress = new Event<(event: ButtonPressEvent) => void | CANCEL>();
+    /** Cancellable.
+     * Triggered when a player opens a chest. Cancelling this event will prevent the player from opening the chest.
+     * To note : This event works for all chest types (normal chests, trapped chests, ender chests).
+     */
+    export const chestOpen = new Event<(event: ChestOpenEvent) => void | CANCEL>();
+    /** Cancellable.
+     * Triggered when 2 chests are paired to form a double chest. Cancelling this event will prevent the chests from pairing.
+     * To note : This event works for all chest types that can be doubled (normal chests, trapped chests).
+     */
+    export const chestPair = new Event<(event: ChestPairEvent) => void | CANCEL>();
+    /** Cancellable but only in a few cases (e.g. interacting with the blocks such as anvil, grindstone, enchanting table, etc.*/
+    export const blockInteractedWith = new Event<(event: BlockInteractedWithEvent) => void | CANCEL>();
+
+    ////////////////////////////////////////////////////////
+    // Entity events
+
+    /** Cancellable */
+    export const entityHurt = new Event<(event: EntityHurtEvent) => void | CANCEL>();
+    /** Not cancellable */
+    export const entityHealthChange = new Event<(event: EntityHeathChangeEvent) => void>();
+    /**
+     * Not cancellable.
+     * it can be occured multiple times even it already died.
+     */
+    export const entityDie = new Event<(event: EntityDieEvent) => void>();
+    /** Not cancellable */
+    export const entitySneak = new Event<(event: EntitySneakEvent) => void>();
+    /** Cancellable */
+    export const entityStartSwimming = new Event<(event: EntityStartSwimmingEvent) => void | CANCEL>();
+    /** Cancellable */
+    export const entityStartRiding = new Event<(event: EntityStartRidingEvent) => void | CANCEL>();
+    /** Cancellable but the client is still exiting though it will automatically ride again after rejoin */
+    export const entityStopRiding = new Event<(event: EntityStopRidingEvent) => void | CANCEL>();
+    /** Cancellable */
+    export const playerAttack = new Event<(event: PlayerAttackEvent) => void | CANCEL>();
+    /** Cancellable */
+    export const playerDropItem = new Event<(event: PlayerDropItemEvent) => void | CANCEL>();
+    /** Not cancellable */
+    export const playerInventoryChange = new Event<(event: PlayerInventoryChangeEvent) => void | CANCEL>();
+    /** Not cancellable */
+    export const playerRespawn = new Event<(event: PlayerRespawnEvent) => void | CANCEL>();
+    /** Cancellable */
+    export const playerLevelUp = new Event<(event: PlayerLevelUpEvent) => void | CANCEL>();
+    /** Not cancellable */
+    export const entityCreated = new Event<(event: EntityCreatedEvent) => void>();
+    /** Not cancellable */
+    export const playerJoin = new Event<(event: PlayerJoinEvent) => void>();
+    /** Not cancellable */
+    export const playerLeft = new Event<(event: PlayerLeftEvent) => void>();
+    /** Cancellable */
+    export const playerPickupItem = new Event<(event: PlayerPickupItemEvent) => void | CANCEL>();
+    /** Not cancellable */
+    export const playerCrit = new Event<(event: PlayerCritEvent) => void>();
+    /** Not cancellable.
+     * Triggered when a player finishes consuming an item.
+     * (e.g : food, potion, etc...)
+     */
+    export const playerUseItem = new Event<(event: PlayerUseItemEvent) => void>();
+    /** Cancellable.
+     * Triggered when a player uses an item. Cancelling this event will prevent the item from being used.
+     * (e.g : splash potion won't be thrown, food won't be consumed, etc...)
+     * To note : this event is triggered with every item, even if they are not consumable.
+     *
+     * @remarks use `itemUseOnBlock` to cancel the usage of an item on a block (e.g : flint and steel)
+     */
+    export const itemUse = new Event<(event: ItemUseEvent) => void | CANCEL>();
+    /** Cancellable.
+     * Triggered when a player uses an item on a block. Cancelling this event will prevent the item from being used
+     * (e.g : flint and steel won't ignite block, seeds won't be planted, etc...)
+     * To note : this event is triggered with every item, even if they are not usable on blocks.
+     */
+    export const itemUseOnBlock = new Event<(event: ItemUseOnBlockEvent) => void | CANCEL>();
+    /** Cancellable */
+    export const splashPotionHit = new Event<(event: SplashPotionHitEvent) => void | CANCEL>();
+    /** Not cancellable */
+    export const projectileShoot = new Event <(event:ProjectileShootEvent) => void> ();
+    /** Cancellable
+     * Triggered when a player sleeps in a bed.
+     * Cancelling this event will prevent the player from sleeping.
+     */
+    export const playerSleepInBed = new Event<(event: PlayerSleepInBedEvent) => void | CANCEL>();
+    /** Not cancellable */
+    export const playerJump = new Event<(event: PlayerJumpEvent) => void | CANCEL>();
+
+    ////////////////////////////////////////////////////////
+    // Level events
+
+    /** Cancellable */
+    export const levelExplode = new Event<(event: LevelExplodeEvent) => void | CANCEL>();
+    /** Not cancellable */
+    export const levelTick = new Event<(event: LevelTickEvent) => void>();
+    /** Cancellable but you won't be able to stop the server */
+    export const levelSave = new Event<(event: LevelSaveEvent) => void | CANCEL>();
+    /** Cancellable */
+    export const levelWeatherChange = new Event<(event: LevelWeatherChangeEvent) => void | CANCEL>();
+
+    ////////////////////////////////////////////////////////
+    // Server events
+
+    /**
+     * before launched. after execute the main thread of BDS.
+     * BDS will be loaded on the separated thread. this event will be executed concurrently with the BDS loading
+     */
+    export const serverLoading = new Event<()=>void>();
+
+    /**
+     * after BDS launched
+     */
+    export const serverOpen = new Event<()=>void>();
+
+    /**
+     * on internal update. but it's not tick.
+     * @deprecated useless and incomprehensible
+     */
+    export const serverUpdate = new Event<()=>void>();
+
+    /**
+     * before serverStop, Minecraft is alive yet
+     * LoopbackPacketSender is alive yet
+     */
+    export const serverLeave = new Event<()=>void>();
+
+    /**
+     * before system.shutdown, Minecraft is alive yet
+     * LoopbackPacketSender is destroyed
+     * some commands are failed on this event. use `events.serverLeave` intead.
+     */
+    export const serverStop = new Event<()=>void>();
+
+    /**
+     * after BDS closed
+     */
+    export const serverClose = new Event<()=>void>();
+
+    /**
+     * server console outputs
+     */
+    export const serverLog = new Event<(log:string, color:Color)=>CANCEL|void>();
+
+    ////////////////////////////////////////////////////////
+    // Packet events
+
+    export enum PacketEventType {
+        Raw,
+        Before,
+        After,
+        Send,
+        SendRaw,
     }
-}
-function onEntityHeal(attributeDelegate: NativePointer, oldHealth:number, newHealth:number, v:VoidPointer):boolean {
-    if (oldHealth < newHealth) {
-        const event = new EntityHurtEvent(attributeDelegate.getPointerAs(Actor, 0x20), newHealth - oldHealth);
-        if (events.entityHeal.fire(event) === CANCEL) {
-            event.entity.setAttribute(AttributeId.Health, oldHealth);
-            return false;
-        } else {
-            attributeDelegate.setPointer(event.entity, 0x20);
-            return _onEntityHeal(attributeDelegate, oldHealth, newHealth, v);
+
+    export function packetEvent(type:PacketEventType, packetId:MinecraftPacketIds):Event<(...args:any[])=>(CANCEL|void)>|null {
+        if ((packetId>>>0) >= PACKET_ID_COUNT) {
+            console.error(`Out of range: packetId < 0x100 (type=${PacketEventType[type]}, packetId=${packetId})`);
+            return null;
+        }
+        const id = type*PACKET_ID_COUNT + packetId;
+        return packetAllTargets[id];
+    }
+
+    /**
+     * before 'before' and 'after'
+     * earliest event for the packet receiving.
+     * It will bring raw packet buffers before parsing
+     * It can be canceled the packet if you return 'CANCEL'
+     */
+    export function packetRaw(id:MinecraftPacketIds):Event<nethook.RawListener> {
+        return getNetEventTarget(PacketEventType.Raw, id);
+    }
+
+    /**
+     * after 'raw', before 'after'
+     * the event that before processing but after parsed from raw.
+     * It can be canceled the packet if you return 'CANCEL'
+     */
+    export function packetBefore<ID extends MinecraftPacketIds>(id:ID):Event<nethook.PacketListener<ID>> {
+        return getNetEventTarget(PacketEventType.Before, id);
+    }
+
+    /**
+     * after 'raw' and 'before'
+     * the event that after processing. some fields are assigned after the processing
+     */
+    export function packetAfter<ID extends MinecraftPacketIds>(id:ID):Event<nethook.PacketListener<ID>> {
+        return getNetEventTarget(PacketEventType.After, id);
+    }
+
+    /**
+     * before serializing.
+     * it can modify class fields.
+     */
+    export function packetSend<ID extends MinecraftPacketIds>(id:ID):Event<nethook.PacketListener<ID>> {
+        return getNetEventTarget(PacketEventType.Send, id);
+    }
+
+    /**
+     * after serializing. before sending.
+     * it can access serialized buffer.
+     */
+    export function packetSendRaw(id:number):Event<nethook.SendRawListener> {
+        return getNetEventTarget(PacketEventType.SendRaw, id);
+    }
+
+    ////////////////////////////////////////////////////////
+    // Misc
+
+    /** Not cancellable */
+    export const queryRegenerate = new Event<(event: QueryRegenerateEvent) => void>();
+    /** Cancellable */
+    export const scoreReset = new Event<(event: ScoreResetEvent) => void | CANCEL>();
+    /** Cancellable */
+    export const scoreSet = new Event<(event: ScoreSetEvent) => void | CANCEL>();
+    /** Cancellable */
+    export const scoreAdd = new Event<(event: ScoreAddEvent) => void | CANCEL>();
+    /** Cancellable */
+    export const scoreRemove = new Event<(event: ScoreRemoveEvent) => void | CANCEL>();
+    /** Cancellable */
+    export const objectiveCreate = new Event<(event: ObjectiveCreateEvent) => void | CANCEL>();
+
+    /**
+    * global error listeners
+    * if returns 'CANCEL', then default error printing is disabled
+    */
+    export const error = Event.errorHandler;
+
+    export function errorFire(err:unknown):void {
+        if (err instanceof Error) {
+            err.stack = remapStack(err.stack);
+        }
+        if (events.error.fire(err) !== CANCEL) {
+            console.error(err && ((err as any).stack || err));
         }
     }
-    return _onEntityHeal(attributeDelegate, oldHealth, newHealth, v);
-}
-const _onEntityHeal = procHacker.hooking("HealthAttributeDelegate::change", RawTypeId.Boolean, null, NativePointer, RawTypeId.Float32, RawTypeId.Float32, VoidPointer)(onEntityHeal);
 
-interface IPlayerAttackEvent {
-    player: Player;
-    victim: Actor;
-}
-class PlayerAttackEvent implements IPlayerAttackEvent {
-    constructor(
-        public player: Player,
-        public victim: Actor,
-    ) {
-    }
-}
-function onPlayerAttack(player:Player, victim:Actor):boolean {
-    const event = new PlayerAttackEvent(player, victim);
-    if (events.playerAttack.fire(event) === CANCEL) {
-        return false;
-    } else {
-        return _onPlayerAttack(event.player, event.victim);
-    }
-}
-const _onPlayerAttack = procHacker.hooking("Player::attack", RawTypeId.Boolean, null, Player, Actor)(onPlayerAttack);
+     /**
+      * command console outputs
+      */
+    export const commandOutput = new Event<(log:string)=>CANCEL|void>();
 
-interface IPlayerDropItemEvent {
-    player: Player;
-    itemStack: ItemStack;
-}
-class PlayerDropItemEvent implements IPlayerDropItemEvent {
-    constructor(
-        public player: Player,
-        public itemStack: ItemStack,
-    ) {
-    }
-}
-function onPlayerDropItem(player:Player, itemStack:ItemStack, v:boolean):boolean {
-    const event = new PlayerDropItemEvent(player, itemStack);
-    if (events.playerDropItem.fire(event) === CANCEL) {
-        return false;
-    } else {
-        return _onPlayerDropItem(event.player, event.itemStack, v);
-    }
-}
-const _onPlayerDropItem = procHacker.hooking("Player::drop", RawTypeId.Boolean, null, Player, ItemStack, RawTypeId.Boolean)(onPlayerDropItem);
+     /**
+      * command input
+      * Commands will be canceled if you return a error code.
+      * 0 means success for error codes but others are unknown.
+      */
+    export const command = new Event<(command: string, originName: string, ctx: CommandContext) => void | number>();
 
-interface IPlayerJoinEvent {
-    readonly player: Player;
-}
-class PlayerJoinEvent implements IPlayerJoinEvent {
-    constructor(
-        readonly player: Player,
-    ) {
-    }
-}
-nethook.before(MinecraftPacketIds.SetLocalPlayerAsInitialized).on((pk, ni) =>{
-    const event = new PlayerJoinEvent(ni.getActor()!);
-    events.playerJoin.fire(event);
-});
-
-interface IPlayerPickupItemEvent {
-    player: Player;
-    //itemStack: ItemStack;
-}
-class PlayerPickupItemEvent implements IPlayerPickupItemEvent {
-    constructor(
-        public player: Player,
-        //public itemStack: ItemStack, // should be from 0x688 at ItemActor but unexpected undefined value
-    ) {
-    }
-}
-
-function onPlayerPickupItem(player:Player, itemActor:VoidPointer, v1:number, v2:number):boolean {
-    const event = new PlayerPickupItemEvent(player/*, itemActor.itemStack*/);
-    if (events.playerPickupItem.fire(event) === CANCEL) {
-        return false;
-    } else {
-        return _onPlayerPickupItem(event.player, itemActor, v1, v2);
-    }
-}
-const _onPlayerPickupItem = procHacker.hooking("Player::take", RawTypeId.Boolean, null, Player, VoidPointer, RawTypeId.Int32, RawTypeId.Int32)(onPlayerPickupItem);
-
-interface IQueryRegenerateEvent {
-    motd: string,
-    levelname: string,
-    currentPlayers: number,
-    maxPlayers: number,
+    /**
+      * network identifier disconnected
+      */
+    export const networkDisconnected = new Event<(ni:NetworkIdentifier)=>void>();
 
 }
-class QueryRegenerateEvent implements IQueryRegenerateEvent {
-    constructor(
-        public motd: string,
-        public levelname: string,
-        public currentPlayers: number,
-        public maxPlayers: number,
-    ) {
-    }
-}
-function onQueryRegenerate(rakNetServerLocator: VoidPointer, motd: CxxStringWrapper, levelname: CxxStringWrapper, gameType: VoidPointer, currentPlayers: number, maxPlayers: number, v: boolean):bin64_t {
-    const event = new QueryRegenerateEvent(motd.value, levelname.value, currentPlayers, maxPlayers);
-    events.queryRegenerate.fire(event);
-    motd.value = event.motd;
-    levelname.value = event.levelname;
-    return _onQueryRegenerate(rakNetServerLocator, motd, levelname, gameType, event.currentPlayers, event.maxPlayers, v);
-}
-const _onQueryRegenerate = procHacker.hooking("RakNetServerLocator::announceServer", RawTypeId.Bin64, null, VoidPointer, CxxStringWrapper, CxxStringWrapper, VoidPointer, RawTypeId.Int32, RawTypeId.Int32, RawTypeId.Boolean)(onQueryRegenerate);
-
-export const events = {
-    /** Cancellable */
-    blockDestroy: new Event<(event: BlockDestroyEvent) => void | CANCEL>(),
-    /** Cancellable */
-    blockPlace: new Event<(event: BlockPlaceEvent) => void | CANCEL>(),
-    /** Cancellable */
-    entityHurt: new Event<(event: EntityHurtEvent) => void | CANCEL>(),
-    /** Cancellable */
-    entityHeal: new Event<(event: EntityHealEvent) => void | CANCEL>(),
-    /** Cancellable */
-    playerAttack: new Event<(event: PlayerAttackEvent) => void | CANCEL>(),
-    /** Cancellable but only when player is in container screens*/
-    playerDropItem: new Event<(event: PlayerDropItemEvent) => void | CANCEL>(),
-    /** Not cancellable */
-    entitySneak: new Event<(event: entitySneakEvent) => void>(),
-    /** Not cancellable */
-    playerJoin: new Event<(event: PlayerJoinEvent) => void>(),
-    /** Cancellable */
-    playerPickupItem: new Event<(event: PlayerPickupItemEvent) => void | CANCEL>(),
-    /** Not cancellable */
-    queryRegenerate: new Event<(event: QueryRegenerateEvent) => void>(),
-};
-
-serverInstance.minecraft.something.shandler.updateServerAnnouncement();

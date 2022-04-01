@@ -1,13 +1,16 @@
 
 /// Referenced from https://github.com/minecraft-addon-tools/minecraft-scripting-types
 
-declare global
-{
+declare global {
     interface MinecraftComponentNameMap {
         /**
          * This component contains all the blockstates on a block object. Blockstates control all different aspects of blocks from their orientation to the type of wood they are. Blockstates are represented by numbers, bools, or strings. Please see the Blockstates Documentation to see the valid values for each state. This component allows for the getting and setting of these states.
          */
-        "minecraft:blockstate":IComponent<IBlockStateComponent>
+        "minecraft:blockstate":IComponent<IBlockStateComponent>;
+        /**
+         * This component represents the contents of an entity's hands. The component contains an array of ItemStack JS API Objects representing each slot in the hand container. NOTE: Currently items and containers are read-only. Slot 0 is main-hand Slot 1 is off-hand.
+         */
+        "minecraft:hand_container":IComponent<IItemStack[]>;
     }
     type MinecraftComponentName = keyof MinecraftComponentNameMap;
 
@@ -212,6 +215,7 @@ declare global
         data: {
             statusMessage: string;
             statusCode: number;
+            [key:string]:any;
         }
     }
     interface IExecuteCommandListCallback {
@@ -373,8 +377,8 @@ declare global
          * @param componentName The name of the component to add to the entity. This is either the name of a built-in component (check the Script Components section) or a custom component created with a call to registerComponent()
          * @returns An object with all the fields as defined in the component, or null if something went wrong when creating the component
          */
-        applyComponentChanges<NAME extends MinecraftComponentName>(entity: MinecraftComponentTypeMap[NAME], componentName: NAME): boolean;
-        applyComponentChanges(entity: IEntity|IBlock, componentName: string): boolean;
+        applyComponentChanges(entity: IEntity|IBlock, component: MinecraftComponentNameMap[keyof MinecraftComponentNameMap]): boolean;
+        applyComponentChanges(entity: IEntity|IBlock, component: IComponent<any>): boolean;
 
         ////////////////////////////////////////////////
         // Entities
@@ -406,6 +410,7 @@ declare global
         listenForEvent(eventIdentifier:string, listener: (ev:IEventData<any>)=>void): boolean | null;
     }
 
+    /** @deprecated it will be removed https://www.minecraft.net/en-us/creator/article/removing-the-additional-modding-capabilities-feature  */
     const server: IServer;
 }
 

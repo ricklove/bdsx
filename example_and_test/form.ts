@@ -1,8 +1,12 @@
-import { command } from "bdsx";
 import { CustomForm, Form, FormLabel } from "bdsx/bds/form";
+import { command } from "bdsx/command";
 
 command.register('form', 'form example').overload(async(param, origin, output)=>{
     const actor = origin.getEntity();
+    if (actor === null) {
+        console.log("it's the command for players");
+        return;
+    }
     const ni = actor.getNetworkIdentifier();
 
     const isYes = await Form.sendTo(ni, {
@@ -10,7 +14,7 @@ command.register('form', 'form example').overload(async(param, origin, output)=>
         title: 'Form Example',
         content: 'Open more forms',
         button1: 'yes',
-        button2: 'no'
+        button2: 'no',
     });
     if (isYes) {
         const res = await Form.sendTo(ni, {
