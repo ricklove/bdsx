@@ -1,4 +1,4 @@
-import * as util from "util";
+import util from "util";
 import { bin } from "../bin";
 import { capi } from "../capi";
 import { abstract, TypedArrayBuffer } from "../common";

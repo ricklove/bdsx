@@ -1,4 +1,4 @@
-import * as util from 'util';
+import util from 'util';
 import { CircularDetector } from "./circulardetector";
 import { abstract, Encoding, TypeFromEncoding } from "./common";
 import { NativePointer, StaticPointer, VoidPointer } from "./core";

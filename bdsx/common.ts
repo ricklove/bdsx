@@ -1,5 +1,5 @@
 
-import * as colors from 'colors';
+import colors from 'colors';
 
 if ((global as any).bdsx != null) {
     console.error(colors.red('[BDSX] multiple imported'));

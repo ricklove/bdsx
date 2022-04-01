@@ -1,8 +1,8 @@
 
-import * as child_process from 'child_process';
-import * as colors from 'colors';
-import * as fs from 'fs';
-import * as path from 'path';
+import child_process from 'child_process';
+import colors from 'colors';
+import fs from 'fs';
+import path from 'path';
 import { fsutil } from '../fsutil';
 
 if (process.argv[2] == null) {

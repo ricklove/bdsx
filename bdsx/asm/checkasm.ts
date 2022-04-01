@@ -1,5 +1,5 @@
 
-import * as path from 'path';
+import path from 'path';
 import { fsutil } from '../fsutil';
 
 const asm = path.join(__dirname, './asmcode.asm');

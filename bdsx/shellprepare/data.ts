@@ -1,6 +1,6 @@
 
-import * as fs from 'fs';
-import * as path from 'path';
+import fs from 'fs';
+import path from 'path';
 import { fsutil } from '../fsutil';
 
 export const shellPrepareData = {

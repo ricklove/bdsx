@@ -2,7 +2,7 @@
 // Visual C++ uses red black tree for std::map
 // https://en.wikipedia.org/wiki/Red%E2%80%93black_tree
 
-import * as util from 'util';
+import util from 'util';
 import { capi } from "./capi";
 import { CxxLess } from "./cxxfunctional";
 import { CxxPair, CxxPairType } from "./cxxpair";

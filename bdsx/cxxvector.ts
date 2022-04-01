@@ -1,4 +1,4 @@
-import * as util from 'util';
+import util from 'util';
 import { NativePointer, VoidPointer } from "./core";
 import { dll } from "./dll";
 import { makefunc } from "./makefunc";

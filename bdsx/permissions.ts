@@ -1,4 +1,4 @@
-import * as path from "path";
+import path from "path";
 import { events } from "./event";
 import { fsutil } from "./fsutil";
 

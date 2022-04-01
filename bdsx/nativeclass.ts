@@ -1,4 +1,4 @@
-import * as util from 'util';
+import util from 'util';
 import { capi } from "./capi";
 import { CircularDetector } from "./circulardetector";
 import { Bufferable, emptyFunc, Encoding, TypeFromEncoding } from "./common";

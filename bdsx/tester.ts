@@ -1,5 +1,5 @@
 
-import * as colors from 'colors';
+import colors from 'colors';
 import { serverInstance } from "./bds/server";
 import { remapError, remapStackLine } from "./source-map-support";
 import { getLineAt } from "./util";

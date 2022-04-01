@@ -1,6 +1,6 @@
 
-import * as fs from 'fs';
-import * as path from 'path';
+import fs from 'fs';
+import path from 'path';
 import { pdb } from '../core';
 import { SYMOPT_PUBLICS_ONLY, UNDNAME_COMPLETE, UNDNAME_NAME_ONLY } from '../dbghelp';
 import { dll } from '../dll';

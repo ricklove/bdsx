@@ -1,4 +1,4 @@
-import * as https from 'https';
+import https from 'https';
 import { HTMLElement, NodeType, parse as parseHtml } from "node-html-parser";
 
 export class HtmlRule {

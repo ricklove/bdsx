@@ -1,7 +1,7 @@
 
-import * as colors from 'colors';
+import colors from 'colors';
 import { cgate } from './core';
-import * as nversion from './version-bdsx.json';
+import nversion from './version-bdsx.json';
 
 if (cgate.bdsxCoreVersion !== nversion) {
     const oversion = cgate.bdsxCoreVersion || '1.0.0.1';

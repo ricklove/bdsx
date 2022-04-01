@@ -1,6 +1,6 @@
 
-import * as fs from 'fs';
-import * as path from 'path';
+import fs from 'fs';
+import path from 'path';
 import { asm } from '../assembler';
 import { uv_async } from '../core';
 import { remapAndPrintError } from '../source-map-support';

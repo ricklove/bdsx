@@ -1,4 +1,4 @@
-import * as ProgressBar from 'progress';
+import ProgressBar from 'progress';
 import { pdb } from "../core";
 import { templateName } from "../templatename";
 import { LanguageParser } from "../textparser";

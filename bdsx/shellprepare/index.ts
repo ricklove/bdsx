@@ -1,6 +1,6 @@
-import * as ts from "typescript";
-import * as glob from 'glob';
-import * as fs from 'fs';
+import ts from "typescript";
+import glob from 'glob';
+import fs from 'fs';
 import { shellPrepareData } from "./data";
 
 const BDSX_PERMANENT = process.env.BDSX_PERMANENT === 'true';

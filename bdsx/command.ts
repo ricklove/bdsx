@@ -1,5 +1,5 @@
 
-import * as colors from 'colors';
+import colors from 'colors';
 import { Command, CommandCheatFlag, CommandContext, CommandEnum, CommandIndexEnum, CommandOutput, CommandParameterData, CommandParameterDataType, CommandParameterOption, CommandPermissionLevel, CommandRegistry, CommandStringEnum, CommandUsageFlag, CommandVisibilityFlag, MCRESULT, MinecraftCommands } from './bds/command';
 import { CommandOrigin } from './bds/commandorigin';
 import { procHacker } from './bds/proc';

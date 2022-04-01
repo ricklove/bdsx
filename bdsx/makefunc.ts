@@ -1,4 +1,4 @@
-import * as util from 'util';
+import util from 'util';
 import { asmcode } from "./asm/asmcode";
 import { asm, Register, X64Assembler } from "./assembler";
 import { proc2 } from "./bds/symbols";

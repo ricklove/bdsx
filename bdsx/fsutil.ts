@@ -2,9 +2,9 @@
 // fsutil.ts should be compatible with old node.js
 // it's used by BDS installer
 
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { BufferWriter } from './writer/bufferstream';
 
 class DirentFromStat extends (fs.Dirent || class{}) {

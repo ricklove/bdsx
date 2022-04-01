@@ -1,7 +1,7 @@
 
-import * as colors from 'colors';
-import * as fs from 'fs';
-import * as path from 'path';
+import colors from 'colors';
+import fs from 'fs';
+import path from 'path';
 
 function checkVersion(installed:number[], required:string):boolean {
     let ifGreater = false;

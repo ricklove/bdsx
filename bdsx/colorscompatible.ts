@@ -2,8 +2,8 @@
  * for changing colors to chalk.
  * not using currently
  */
-import * as chalk from 'chalk';
-import * as colors from 'colors';
+import chalk from 'chalk';
+import colors from 'colors';
 
 const colorsKeys = [
     'strip',

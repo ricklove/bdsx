@@ -1,5 +1,5 @@
 
-import * as colors from 'colors';
+import colors from 'colors';
 
 /**
  * check the memory leak of the input function.

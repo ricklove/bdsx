@@ -11,8 +11,8 @@ import { fsutil } from "bdsx/fsutil";
 import { bedrockServer } from "bdsx/launcher";
 import { bool_t, CxxString, int32_t } from "bdsx/nativetype";
 import { shellPrepareData } from "bdsx/shellprepare/data";
-import * as fs from 'fs';
-import * as path from 'path';
+import fs from 'fs';
+import path from 'path';
 
 command.find('say').signature.permissionLevel = CommandPermissionLevel.Admin; // change the say permission
 

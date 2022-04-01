@@ -1,10 +1,10 @@
 
-import * as colors from 'colors';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as ProgressBar from 'progress';
-import * as stripJsonComments from 'strip-json-comments';
-import * as unzipper from 'unzipper';
+import colors from 'colors';
+import fs from 'fs';
+import path from 'path';
+import ProgressBar from 'progress';
+import stripJsonComments from 'strip-json-comments';
+import unzipper from 'unzipper';
 import { fsutil } from './fsutil';
 import { serverProperties } from './serverproperties';
 

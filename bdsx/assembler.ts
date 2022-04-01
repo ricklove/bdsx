@@ -1,4 +1,4 @@
-import * as colors from 'colors';
+import colors from 'colors';
 import { bin } from "./bin";
 import { fsutil } from "./fsutil";
 import { polynominal } from "./polynominal";

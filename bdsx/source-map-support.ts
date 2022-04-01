@@ -1,9 +1,9 @@
 
-import * as colors from 'colors';
-import * as fs from 'fs';
-import * as path from 'path';
+import colors from 'colors';
+import fs from 'fs';
+import path from 'path';
 import { SourceMapConsumer } from 'source-map';
-import * as util from 'util';
+import util from 'util';
 import { getLineAt, indexOfLine, removeLine } from './util';
 
 const HIDE_UNDERSCOPE = true;

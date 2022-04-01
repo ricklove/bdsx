@@ -1,7 +1,7 @@
 
-import * as path from 'path';
+import path from 'path';
 import { FileWriter } from '../../writer/filewriter';
-import * as docfixJson from './docfix.json';
+import docfixJson from './docfix.json';
 import { HtmlSearcher, htmlutil } from './htmlutil';
 import { styling } from './styling';
 import { DocField, DocFixItem, DocMethod, DocType as DocType } from './type';

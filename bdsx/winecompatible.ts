@@ -1,7 +1,7 @@
 
-import * as child_process from 'child_process';
-import * as fs from 'fs';
-import * as path from 'path';
+import child_process from 'child_process';
+import fs from 'fs';
+import path from 'path';
 import { Config } from './config';
 import { cgate, VoidPointer } from './core';
 import { dll } from "./dll";

@@ -1,5 +1,5 @@
 
-import * as path from "path";
+import path from "path";
 import { asm } from "./assembler";
 import { cgate, ipfilter, jshook, runtimeError, VoidPointer } from "./core";
 import { dllraw } from "./dllraw";

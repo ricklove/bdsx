@@ -1,6 +1,6 @@
 
-import * as colors from 'colors';
-import * as path from 'path';
+import colors from 'colors';
+import path from 'path';
 import { ConcurrencyQueue } from './concurrency';
 import { fsutil } from './fsutil';
 import { remapAndPrintError } from './source-map-support';
