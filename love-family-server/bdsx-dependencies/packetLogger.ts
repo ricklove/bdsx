@@ -1,4 +1,5 @@
-import { nethook, PacketId } from "bdsx";
+import { nethook } from "bdsx/nethook";
+import { MinecraftPacketIds as PacketId } from "bdsx/bds/packetids";
 import { hex } from "bdsx/util";
 
 // Network Hooking: Print all packets
