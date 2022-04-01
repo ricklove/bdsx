@@ -1,6 +1,5 @@
-import { ProcHacker } from "bdsx/prochacker";
-import symbols = require("./symbols");
-
+import { ProcHacker } from "../prochacker";
+import * as symbols from "./symbols";
 
 export import proc = symbols.proc;
 export import proc2 = symbols.proc2;

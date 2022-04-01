@@ -1,6 +1,6 @@
 import { HtmlSearcher } from "./htmlutil";
 import { styling } from "./styling";
-import { FileWriter } from "./writer";
+import { FileWriter } from "../../writer/filewriter";
 
 const READONLY = /^READ ONLY. /;
 const WILL_BE = / Will be: (.+)\.$/;
@@ -108,7 +108,7 @@ export class DocField {
     }
 }
 
-const PARAM = /^param([0-9]+):(.+)$/;
+const PARAM = /^param(\d+):(.+)$/;
 
 export class DocMethod {
     public readonly params:DocField[] = [];
@@ -139,7 +139,7 @@ export class DocMethod {
                     break;
                 }
             }
-            if (docfix.return !== undefined) {
+            if (docfix.return != null) {
                 method.return = DocType.fromDocFix(docfix.return);
             }
         }
@@ -228,8 +228,7 @@ export class DocType {
                 break;
             }
 
-            for (const key in docfix) {
-                const item = docfix[key];
+            for (const [key, item] of Object.entries(docfix)) {
                 if (key.startsWith('field:')) {
                     const type = DocType.fromDocFix(item as DocFixItem|string);
                     out.fields.push(new DocField(key.substr(6), type));
@@ -295,8 +294,8 @@ export class DocType {
             this.fields.length = 0;
             this.methods.length = 0;
         }
-        if (docfix.optional !== undefined) this.optional = docfix.optional;
-        if (docfix.readonly !== undefined) this.readonly = docfix.readonly;
+        if (docfix.optional != null) this.optional = docfix.optional;
+        if (docfix.readonly != null) this.readonly = docfix.readonly;
         if (docfix.wrapToArray) {
             const inner = new DocType;
             inner.set(this);

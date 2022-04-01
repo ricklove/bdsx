@@ -1,5 +1,5 @@
 
-const singleton = Symbol();
+const singleton = Symbol('singleton-manager');
 
 export class Singleton<T> extends WeakMap<any, T> {
     newInstance<P>(param:P, allocator:()=>T):T {
@@ -11,7 +11,7 @@ export class Singleton<T> extends WeakMap<any, T> {
 
     static newInstance<T>(base:{prototype:any,[singleton]?:Singleton<any>}, param:unknown, mapper:()=>T):T {
         let map = base[singleton];
-        if (map === undefined) base[singleton] = map = new Singleton;
+        if (map == null) base[singleton] = map = new Singleton;
         return map.newInstance(param, mapper);
     }
 }

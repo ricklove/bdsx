@@ -1,14 +1,13 @@
 
-
-import child_process = require('child_process');
-import blessed = require('blessed');
-import fs = require('fs');
+import * as blessed from 'blessed';
+import * as child_process from 'child_process';
+import { fsutil } from '../fsutil';
 
 const SELECTABLE_ITEM_STYLE = {
     fg: 'magenta',
     selected: {
-        bg: 'blue'
-    }
+        bg: 'blue',
+    },
 };
 
 interface PackageInfoJson {
@@ -38,7 +37,7 @@ interface PackageInfoJson {
 function exec(command:string):Promise<string>{
     return new Promise((resolve, reject)=>{
         child_process.exec(command, {
-            encoding: 'utf-8'
+            encoding: 'utf-8',
         }, (err, output)=>{
             if (err) {
                 reject(err);
@@ -49,11 +48,10 @@ function exec(command:string):Promise<string>{
     });
 }
 
-
 function execWithoutError(command:string):Promise<string>{
     return new Promise((resolve, reject)=>{
         child_process.exec(command, {
-            encoding: 'utf-8'
+            encoding: 'utf-8',
         }, (err, output)=>{
             resolve(output);
         });
@@ -66,11 +64,11 @@ class PackageInfo {
     public readonly author: string;
     public readonly date: string;
     public readonly version: string;
-    public readonly installed: string;
+    public readonly installed: string|null;
 
     private versions:string[]|null = null;
 
-    constructor(info: PackageInfoJson, deps?:Record<string, {version:string}>) {
+    constructor(info: PackageInfoJson, deps?:Record<string, {version:string|null}>) {
         this.name = info.name;
         this.desc = info.description || '';
         this.author = info.publisher.username;
@@ -78,17 +76,21 @@ class PackageInfo {
         this.version = info.version;
 
         const installedInfo = deps && deps[this.name];
-        this.installed = installedInfo && installedInfo.version || '';
+        this.installed = (installedInfo && installedInfo.version) || null;
     }
 
     async getVersions():Promise<string[]> {
         if (this.versions !== null) return this.versions;
         const versions = await exec(`npm view "${this.name}" versions --json`);
-        return this.versions = JSON.parse(versions.replace(/'/g, '"'));
+        const vs = JSON.parse(versions.replace(/'/g, '"'));
+        return this.versions = vs;
     }
 
     static async search(name: string, deps?:Record<string, {version:string}>): Promise<PackageInfo[]> {
-        const output = await execWithoutError(`npm search --json "${name}"`);
+        const output = await execWithoutError(`npm search --json "${name}" --searchlimit=50`);
+        if (output === '\n]\n\n') { // a bug? empty list
+            return [];
+        }
         const result = JSON.parse(output) as PackageInfoJson[];
         return result.map(item => new PackageInfo(item, deps));
     }
@@ -111,7 +113,7 @@ function loadingWrap<T>(text:string, prom:Promise<T>):Promise<T>{
     const loading = blessed.loading({
         border: 'line',
         top: 3,
-        width: '100%-1'
+        width: '100%-1',
     });
     screen.append(loading);
     loading.load(text);
@@ -129,7 +131,7 @@ function loadingWrap<T>(text:string, prom:Promise<T>):Promise<T>{
 
 let latestSelected = 0;
 let latestSearched = '';
-function searchAndSelect(prefix:string, deps:Record<string, {version:string}>):Promise<PackageInfo> {
+function searchAndSelect(prefixes:string[], deps:Record<string, {version:string}>):Promise<PackageInfo> {
     return new Promise(resolve=>{
         if (screen === null) throw Error('blessed.screen not found');
         const scr = screen;
@@ -143,8 +145,8 @@ function searchAndSelect(prefix:string, deps:Record<string, {version:string}>):P
             style: {
                 fg: 'blue',
                 focus: {
-                    fg: 'white'
-                }
+                    fg: 'white',
+                },
             },
         });
 
@@ -155,9 +157,9 @@ function searchAndSelect(prefix:string, deps:Record<string, {version:string}>):P
             style: {
                 header: {
                     fg: 'blue',
-                    bold: true
+                    bold: true,
                 },
-                cell: SELECTABLE_ITEM_STYLE
+                cell: SELECTABLE_ITEM_STYLE,
             },
             top: 3,
             scrollable: true,
@@ -196,13 +198,27 @@ function searchAndSelect(prefix:string, deps:Record<string, {version:string}>):P
         });
 
         async function searchText(name:string):Promise<void> {
-            if (name === '') {
-                table.setData([['Please enter the plugin name for searching']]);
+            scr.remove(table);
+
+            const waits = prefixes.map(prefix=>PackageInfo.search(prefix+name, deps));
+            let pkgsArray:PackageInfo[][];
+            try {
+                pkgsArray = await loadingWrap('Searching...', Promise.all(waits));
+            } catch (err) {
+                const stack:string = err.stack;
+                table.setData(stack.split('\n').map(str=>[str]));
+                scr.append(table);
                 processInput();
                 return;
             }
-            scr.remove(table);
-            packages = await loadingWrap('Searching...', PackageInfo.search(name, deps));
+            packages = ([] as PackageInfo[]).concat(...pkgsArray);
+            packages = packages.filter(info=>{
+                for (const prefix of prefixes) {
+                    if (!info.name.startsWith(prefix)) continue;
+                    return true;
+                }
+                return false;
+            });
             scr.append(table);
             preparing = false;
 
@@ -230,34 +246,42 @@ function searchAndSelect(prefix:string, deps:Record<string, {version:string}>):P
                 }
 
                 latestSearched = value;
-                searchText(prefix+value);
+                searchText(value);
             });
         }
         table.key('escape', processInput);
         scr.append(search);
         search.setValue(latestSearched);
         scr.append(table);
-        searchText(prefix+latestSearched);
+        searchText(latestSearched);
     });
 }
 
-function selectVersion(name:string, latestVersion:string, installedVersion:string, versions:string[]):Promise<(string|null)> {
+function reverse<T>(items:T[]):T[] {
+    const n = items.length;
+    const last = n-1;
+    const half = n >> 1;
+    for (let i=0;i<half;i++) {
+        const j = last-i;
+        const t = items[i];
+        items[i] = items[j];
+        items[j] = t;
+    }
+    return items;
+}
+
+function selectVersion(name:string, latestVersion:string, installedVersion:string|null, versions:string[]):Promise<(string|null)> {
     return new Promise(resolve=>{
         if (screen === null) throw Error('blessed.screen not found');
 
-        const vnames = versions.reverse().map(v=>`${name}@${v}`);
-        let installed = false;
+        const vnames = reverse(versions).map(v=>`${name}@${v}`);
         for (let i=0;i<versions.length;i++) {
             let moveToTop = false;
             if (versions[i] === latestVersion) {
                 vnames[i] += ' (Latest)';
                 moveToTop = true;
             }
-            if (versions[i] === installedVersion) {
-                vnames[i] += ' (Installed)';
-                moveToTop = true;
-                installed = true;
-            }
+            if (versions[i] === installedVersion) continue;
 
             if (moveToTop) {
                 vnames.unshift(vnames.splice(i, 1)[0]);
@@ -265,9 +289,15 @@ function selectVersion(name:string, latestVersion:string, installedVersion:strin
             }
         }
 
-        if (installed) {
-            vnames.unshift('Remove');
-            versions.unshift('');
+        if (installedVersion !== null) {
+            if (versions.indexOf(installedVersion) === -1) {
+                vnames.unshift(installedVersion + ' (Installed)');
+                versions.unshift(installedVersion);
+            }
+            if (!installedVersion.startsWith('file:plugins/')) {
+                vnames.unshift('Remove');
+                versions.unshift('');
+            }
         }
 
         const list = blessed.list({
@@ -292,7 +322,8 @@ function selectVersion(name:string, latestVersion:string, installedVersion:strin
         });
         list.on('select', (item, index)=>{
             list.destroy();
-            resolve(versions[index]);
+            const version = versions[index];
+            resolve(version);
         });
     });
 }
@@ -301,16 +332,24 @@ function selectVersion(name:string, latestVersion:string, installedVersion:strin
     for (;;) {
         if (screen === null)  {
             screen = blessed.screen({
-                smartCSR: true
+                smartCSR: true,
             });
             screen.title = 'BDSX Plugin Manager';
             screen.key(['q', 'C-c'], (ch, key)=>process.exit(0));
         }
 
-        const packagejson = JSON.parse(fs.readFileSync('./package-lock.json', 'utf8'));
+        let packagejson:any;
+        try {
+            packagejson = JSON.parse(await fsutil.readFile('./package-lock.json'));
+        } catch (err) {
+            screen.destroy();
+            screen = null;
+            console.error(err.message);
+            return;
+        }
         const deps = packagejson.dependencies || {};
 
-        const plugin = await searchAndSelect('@bdsx/', deps);
+        const plugin = await searchAndSelect(['@bdsx/'], deps);
 
         const topbox = blessed.box({
             border:'line',
@@ -325,6 +364,7 @@ function selectVersion(name:string, latestVersion:string, installedVersion:strin
         const version = await selectVersion(plugin.name, plugin.version, plugin.installed, versions);
         topbox.destroy();
         if (version === null) continue;
+        if (version === plugin.installed) continue;
         screen.destroy();
         screen = null;
 

@@ -1,5 +1,5 @@
 
-import fs = require('fs');
+import * as util from 'util';
 
 export function memdiff(dst:number[]|Uint8Array, src:number[]|Uint8Array):number[] {
     const size = src.length;
@@ -54,15 +54,26 @@ export function memdiff_contains(larger:number[], smaller:number[]):boolean {
 }
 export function memcheck(code:Uint8Array, originalCode:number[], skip?:number[]):number[]|null {
     const diff = memdiff(code, originalCode);
-    if (skip !== undefined) {
+    if (skip != null) {
         if (memdiff_contains(skip, diff)) return null;
     }
     return diff;
 }
+
+export function hexn(value:number, hexcount:number):string {
+    const out:number[] = new Array(hexcount);
+    for (let i=hexcount-1;i>=0;i--) {
+        const n = value & 0xf;
+        value >>= 4;
+        if (n < 10) out[i] = n+0x30;
+        else out[i] = n+(0x41-10);
+    }
+    return String.fromCharCode(...out);
+}
 export function hex(values:number[]|Uint8Array, nextLinePer?:number):string {
     const size = values.length;
     if (size === 0) return '';
-    if (nextLinePer === undefined) nextLinePer = size;
+    if (nextLinePer == null) nextLinePer = size;
 
     const out:number[] = [];
     for (let i=0;i<size;) {
@@ -78,7 +89,21 @@ export function hex(values:number[]|Uint8Array, nextLinePer?:number):string {
         out.push(0x20);
     }
     out.pop();
-    return String.fromCharCode(...out);
+
+    const LIMIT = 1024; // it's succeeded with 1024*8 but used a less number for safety
+    let offset = LIMIT;
+    if (out.length <= LIMIT) {
+        return String.fromCharCode(...out);
+    }
+
+    // split for stack space
+    let outstr = '';
+    do {
+        outstr += String.fromCharCode(...out.slice(offset-1024, offset));
+        offset += LIMIT;
+    } while (offset < out.length);
+    outstr += String.fromCharCode(...out.slice(offset-1024));
+    return outstr;
 }
 export function unhex(hex:string):Uint8Array {
     const hexes = hex.split(/[ \t\r\n]+/g);
@@ -127,99 +152,17 @@ export function getLineAt(context:string, lineIndex:number):string {
     else return context.substring(idx, next);
 }
 
-export function isDirectory(file:string):boolean {
-    try {
-        return fs.statSync(file).isDirectory();
-    } catch (err) {
-        return false;
-    }
-}
-
-export function isFile(filepath:string):boolean {
-    try {
-        return fs.statSync(filepath).isFile();
-    } catch (err) {
-        return false;
-    }
-}
-
-export function isBaseOf<BASE>(t: unknown, base: { new(...args: any[]): BASE }): t is { new(...args: any[]): BASE } {
+export function isBaseOf<BASE extends { new(...args: any[]): any }>(t: unknown, base: BASE): t is BASE {
     if (typeof t !== 'function') return false;
     if (t === base) return true;
     return t.prototype instanceof base;
 }
 
+/**
+ * @deprecated Use `util.inspect(v)` instead.
+ */
 export function anyToString(v:unknown):string {
-    const circular = new WeakSet<Record<string, any>>();
-
-    let out = '';
-    function writeArray(v:unknown[]):void {
-        if (v.length === 0) {
-            out += '[]';
-            return;
-        }
-        out += '[ ';
-        out += v[0];
-        for (let i=1;i<v.length;i++) {
-            out += ', ';
-            write(v[i]);
-        }
-        out += '] ';
-    }
-    function writeObject(v:Record<string, any>|null):void {
-        if (v === null) {
-            out += 'null';
-            return;
-        }
-        if (circular.has(v)) {
-            out += '[Circular]';
-            return;
-        }
-        circular.add(v);
-        if (v instanceof Array) {
-            writeArray(v);
-        } else {
-            const entires = Object.entries(v);
-            if (entires.length === 0) {
-                out += '{}';
-                return;
-            }
-            out += '{ ';
-            {
-                const [name, value] = entires[0];
-                out += name;
-                out += ': ';
-                write(value);
-            }
-            for (let i=1;i<entires.length;i++) {
-                const [name, value] = entires[i];
-                out += ', ';
-                out += name;
-                out += ': ';
-                write(value);
-            }
-            out += ' }';
-        }
-    }
-    function write(v:unknown):void {
-        switch (typeof v) {
-        case 'object':
-            writeObject(v);
-            break;
-        case 'string':
-            out += JSON.stringify(v);
-            break;
-        default:
-            out += v;
-            break;
-        }
-    }
-    if (typeof v === 'object') {
-        writeObject(v);
-    } else {
-        return `${v}`;
-    }
-    return out;
+    return util.inspect(v);
 }
 
 export function str2set(str:string):Set<number>{
@@ -229,3 +172,120 @@ export function str2set(str:string):Set<number>{
     }
     return out;
 }
+
+export function arrayEquals(arr1:ArrayLike<any>, arr2:ArrayLike<any>, count?:number):boolean {
+    if (count == null) {
+        count = arr1.length;
+        if (count !== arr2.length) return false;
+    }
+    for (let i=0;i<count;i++) {
+        if (arr1[i] !== arr2[i]) return false;
+    }
+    return true;
+}
+
+export function assertDeepEquals(a:unknown, b:unknown):void {
+    if (a === b) return;
+    _failed:{
+        if (typeof a !== 'object' || typeof b !== 'object') {
+            break _failed;
+        }
+        if (a === null || b === null) {
+            break _failed;
+        }
+        if (a.constructor !== b.constructor) {
+            break _failed;
+        }
+        assertDeepEquals(Object.getPrototypeOf(a), Object.getPrototypeOf(b));
+        for (const [key, value] of Object.entries(a)) {
+            if (!(key in b)) {
+                break _failed;
+            }
+            assertDeepEquals(value, (b as any)[key]);
+        }
+        for (const key of Object.keys(b)) {
+            if (!(key in a)) {
+                break _failed;
+            }
+        }
+    }
+    throw Error('assertion failed');
+}
+
+export function makeSignature(sig:string):number {
+    if (sig.length > 4) throw Error('too long');
+    let out = 0;
+    for (let i=0;i<4;i++) {
+        out += sig.charCodeAt(i) << (i*8);
+    }
+    return out;
+}
+
+export function checkPowOf2(n:number):void {
+    let mask = n - 1;
+    mask |= (mask >> 16);
+    mask |= (mask >> 8);
+    mask |= (mask >> 4);
+    mask |= (mask >> 2);
+    mask |= (mask >> 1);
+    mask ++;
+    if (mask !== n) throw Error(`${n} is not pow of 2`);
+}
+
+export function numberWithFillZero(n:number, width:number, radix?:number):string {
+    const text = (n>>>0).toString(radix);
+    if (text.length >= width) return text;
+    return '0'.repeat(width-text.length)+text;
+}
+
+export function filterToIdentifierableString(name:string):string {
+    name = name.replace(/[^a-zA-Z_$0-9]/g, '');
+    try {
+        eval(`((${name})=>{})`)(); // Rjlintkh suggestion
+    } catch {
+        return '_'+name;
+    }
+    return name;
+}
+
+export function printOnProgress(message:string):void {
+    process.stdout.cursorTo(0);
+    process.stdout.write(message);
+    process.stdout.clearLine(1);
+    console.log();
+}
+
+export function getEnumKeys<T extends Record<string, number|string>>(enumType:T):(keyof T)[] {
+    const NUMBERIC = /^[1-9]\d*$/;
+    return Object.keys(enumType).filter(v => typeof v === 'string' && v !== '0' && !NUMBERIC.test(v));
+}
+
+export const ESCAPE = "§";
+
+export const TextFormat = {
+    BLACK: ESCAPE + "0",
+    DARK_BLUE: ESCAPE + "1",
+    DARK_GREEN: ESCAPE + "2",
+    DARK_AQUA: ESCAPE + "3",
+    DARK_RED: ESCAPE + "4",
+    DARK_PURPLE: ESCAPE + "5",
+    GOLD: ESCAPE + "6",
+    GRAY: ESCAPE + "7",
+    DARK_GRAY : ESCAPE + "8",
+    BLUE: ESCAPE + "9",
+    GREEN: ESCAPE + "a",
+    AQUA: ESCAPE + "b",
+    RED: ESCAPE + "c",
+    LIGHT_PURPLE: ESCAPE + "d",
+    YELLOW: ESCAPE + "e",
+    WHITE: ESCAPE + "f",
+    RESET: ESCAPE + "r",
+    OBFUSCATED: ESCAPE + "k",
+    BOLD: ESCAPE + "l",
+    STRIKETHROUGH: ESCAPE + "m",
+    UNDERLINE: ESCAPE + "n",
+    ITALIC: ESCAPE + "o",
+    THIN: ESCAPE + "¶",
+};
+
+Object.freeze(TextFormat);

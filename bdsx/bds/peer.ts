@@ -1,13 +1,13 @@
-import { VoidPointer } from "bdsx/core";
-import { SharedPtr } from "bdsx/sharedpointer";
-import { nativeClass, NativeClass, nativeField } from "bdsx/nativeclass";
+import { abstract } from "../common";
+import { VoidPointer } from "../core";
+import { AbstractClass, nativeClass, nativeField } from "../nativeclass";
+import { CxxString } from "../nativetype";
+import { CxxSharedPtr } from "../sharedpointer";
 import { RakNet } from "./raknet";
 import { BinaryStream } from "./stream";
-import { abstract } from "bdsx/common";
-import { CxxStringWrapper } from "bdsx/pointer";
 
 @nativeClass(null)
-export class RaknetNetworkPeer extends NativeClass {
+export class RaknetNetworkPeer extends AbstractClass {
     @nativeField(VoidPointer)
     vftable:VoidPointer;
     @nativeField(VoidPointer)
@@ -21,19 +21,19 @@ export class RaknetNetworkPeer extends NativeClass {
 }
 
 @nativeClass(null)
-export class EncryptedNetworkPeer extends NativeClass {
-    @nativeField(SharedPtr.make(RaknetNetworkPeer))
-    peer:SharedPtr<RaknetNetworkPeer>;
+export class EncryptedNetworkPeer extends AbstractClass {
+    @nativeField(CxxSharedPtr.make(RaknetNetworkPeer))
+    peer:CxxSharedPtr<RaknetNetworkPeer>;
 }
 
 @nativeClass(null)
-export class CompressedNetworkPeer extends NativeClass {
+export class CompressedNetworkPeer extends AbstractClass {
     @nativeField(EncryptedNetworkPeer.ref(), 0x48)
     peer:EncryptedNetworkPeer;
 }
 
 @nativeClass(null)
-export class BatchedNetworkPeer extends NativeClass {
+export class BatchedNetworkPeer extends AbstractClass {
     @nativeField(VoidPointer)
     vftable:VoidPointer;
     @nativeField(CompressedNetworkPeer.ref())
@@ -41,7 +41,7 @@ export class BatchedNetworkPeer extends NativeClass {
     @nativeField(BinaryStream)
     stream:BinaryStream;
 
-    sendPacket(data:CxxStringWrapper, reliability:number, n:number, n2:number, compressibility:number):void {
+    sendPacket(data:CxxString, reliability:number, n:number, n2:number, compressibility:number):void {
         abstract();
     }
 }

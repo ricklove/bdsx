@@ -1,7 +1,14 @@
 import { bin } from "./bin";
 import { VoidPointer } from "./core";
-import { nativeField, NativeArray, nativeClass, NativeClass } from "./nativeclass";
+import { NativeArray, nativeClass, NativeClass, nativeField } from "./nativeclass";
 import { bin64_t, int32_t, uint16_t, uint32_t, uint8_t } from "./nativetype";
+
+const UBYTE = uint8_t;
+type UBYTE = uint8_t;
+const USHORT = uint16_t;
+type USHORT = uint16_t;
+const ULONG = uint32_t;
+type ULONG = uint32_t;
 
 export const MAX_PATH = 260;
 
@@ -480,9 +487,14 @@ export class FILETIME extends NativeClass {
     dwHighDateTime: DWORD;
 }
 
+export function IMAGE_FIRST_SECTION(ntheader:IMAGE_NT_HEADERS64):IMAGE_SECTION_HEADER {
+    return ntheader.addAs(IMAGE_SECTION_HEADER, IMAGE_NT_HEADERS64.offsetOf('OptionalHeader') + ntheader.FileHeader.SizeOfOptionalHeader);
+}
+
 export const EXCEPTION_BREAKPOINT = 0x80000003|0;
 export const EXCEPTION_ACCESS_VIOLATION = 0xC0000005|0;
 export const STATUS_INVALID_PARAMETER = 0xC000000D|0;
+export const EXCEPTION_NONCONTINUABLE_EXCEPTION = 0xC0000025|0;
 
 export const FORMAT_MESSAGE_ALLOCATE_BUFFER  = 0x00000100;
 export const FORMAT_MESSAGE_IGNORE_INSERTS   = 0x00000200;
@@ -650,7 +662,6 @@ export const SUBLANG_SYS_DEFAULT =                         0x02;    // system de
 export const SUBLANG_CUSTOM_DEFAULT =                      0x03;    // default custom language/locale
 export const SUBLANG_CUSTOM_UNSPECIFIED =                  0x04;    // custom language/locale
 export const SUBLANG_UI_CUSTOM_DEFAULT =                   0x05;    // Default custom MUI language/locale
-
 
 export const SUBLANG_AFRIKAANS_SOUTH_AFRICA =              0x01;    // Afrikaans (South Africa) 0x0436 af-ZA
 export const SUBLANG_ALBANIAN_ALBANIA =                    0x01;    // Albanian (Albania) 0x041c sq-AL
@@ -890,6 +901,5 @@ export const SUBLANG_YAKUT_RUSSIA =                        0x01;    // Deprecate
 export const SUBLANG_YI_PRC =                              0x01;    // Yi (PRC)) 0x0478
 export const SUBLANG_YORUBA_NIGERIA =                      0x01;    // Yoruba (Nigeria) 046a yo-NG
 export const SUBLANG_ZULU_SOUTH_AFRICA =                   0x01;    // isiZulu / Zulu (South Africa) 0x0435 zu-ZA
-
 
 export const ERROR_MOD_NOT_FOUND = 126;

@@ -1,5 +1,5 @@
 
-import colors = require('colors');
+import * as colors from 'colors';
 import { str2set } from './util';
 
 const SPACE_REG = /^([\s\uFEFF\xA0]*)(.*[^\s\uFEFF\xA0])[\s\uFEFF\xA0]*$/;
@@ -57,6 +57,11 @@ export class LanguageParser extends TextParser {
         for (const chr of SPACES) {
             this.seperators.add(chr);
         }
+    }
+
+    unget(str:string):void {
+        this.i = this.context.lastIndexOf(str, this.i-1);
+        if (this.i === -1) throw Error(`${str} not found in '${this.context}'`);
     }
 
     readIdentifier():string|null {
@@ -206,6 +211,7 @@ export class TextLineParser extends TextParser {
 
             let content:string;
             if (res === null) {
+                if (this.i === context.length) break;
                 content = context.substr(this.i);
             } else {
                 if (res.index === 0) {
@@ -275,7 +281,7 @@ export class TextLineParser extends TextParser {
         return new ParsingError(message, {
             column: this.matchedIndex,
             width: this.matchedWidth,
-            line: this.lineNumber
+            line: this.lineNumber,
         });
     }
 
@@ -283,7 +289,7 @@ export class TextLineParser extends TextParser {
         return {
             line: this.lineNumber,
             column: this.matchedIndex,
-            width: this.matchedWidth
+            width: this.matchedWidth,
         };
     }
 }
@@ -329,7 +335,7 @@ export class ParsingError extends Error {
 
     constructor(
         message:string,
-        public readonly pos:SourcePosition|null
+        public readonly pos:SourcePosition|null,
     ) {
         super(pos !== null ? `${message}, line:${pos.line}` : message);
         this.errors.push(new ErrorPosition(message, 'error', pos));

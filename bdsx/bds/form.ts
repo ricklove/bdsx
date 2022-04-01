@@ -1,5 +1,7 @@
-import { MinecraftPacketIds, nethook, NetworkIdentifier } from "bdsx";
-import { SetTitlePacket, ShowModalFormPacket } from "./packets";
+import { events } from "../event";
+import { NetworkIdentifier } from "./networkidentifier";
+import { MinecraftPacketIds } from "./packetids";
+import { ModalFormRequestPacket, SetTitlePacket } from "./packets";
 
 const formMaps = new Map<number, SentForm>();
 
@@ -18,7 +20,7 @@ class SentForm {
         public readonly resolve: (data:FormResponse<any>)=>void,
         public readonly reject: (err:Error)=>void) {
 
-        // allocate id without dupication
+        // allocate id without duplication
         for (;;) {
             const id = formIdCounter++;
             if (formIdCounter >= MAXIMUM_FORM_ID) formIdCounter = MINIMUM_FORM_ID;
@@ -204,36 +206,34 @@ export class FormInput extends FormComponent implements FormItemInput {
 }
 
 export class Form<DATA extends FormData> {
-    protected externalLoading = false;
     labels: Map<number, string> = new Map<number, string>();
     response:any;
 
     constructor(public data:DATA) {
     }
 
-    static sendTo<T extends FormData['type']>(target:NetworkIdentifier, data:FormData&{type:T}):Promise<FormResponse<T>> {
+    static sendTo<T extends FormData['type']>(target:NetworkIdentifier, data:FormData&{type:T}, opts?:Form.Options):Promise<FormResponse<T>> {
         return new Promise((resolve:(res:FormResponse<T>)=>void, reject)=>{
             const submitted = new SentForm(target, resolve, reject);
-            const pk = ShowModalFormPacket.create();
+            const pk = ModalFormRequestPacket.allocate();
             pk.id = submitted.id;
+            if (opts != null) opts.id = pk.id;
             pk.content = JSON.stringify(data);
             pk.sendTo(target);
             pk.dispose();
 
             const formdata:FormData = data;
             if (formdata.type === 'form') {
-                if (formdata.buttons !== undefined) {
-                    let externalLoading = false;
+                if (formdata.buttons != null) {
                     for (const button of formdata.buttons) {
-                        if (button.image?.type === "url") externalLoading = true;
-                    }
-
-                    if (externalLoading) {
-                        setTimeout(() => {
-                            const pk = SetTitlePacket.create();
-                            pk.sendTo(target);
-                            pk.dispose();
-                        }, 1000);
+                        if (button.image?.type === "url") {
+                            setTimeout(() => {
+                                const pk = SetTitlePacket.allocate();
+                                pk.sendTo(target);
+                                pk.dispose();
+                            }, 1000);
+                            break;
+                        }
                     }
                 }
             }
@@ -241,8 +241,9 @@ export class Form<DATA extends FormData> {
     }
 
     sendTo(target:NetworkIdentifier, callback?: (form: Form<DATA>, networkIdentifier: NetworkIdentifier) => any):number {
-        const submitted = new SentForm(target, res=>{
-            if (callback === undefined) return;
+        const opts:Form.Options = {};
+        Form.sendTo(target, this.data, opts).then(res=>{
+            if (callback == null) return;
             switch (this.data.type) {
             case "form":
                 this.response = this.labels.get(res as any) || res;
@@ -260,26 +261,22 @@ export class Form<DATA extends FormData> {
                 break;
             }
             callback(this, target);
-        }, err=>{
-            throw err;
         });
-        const pk = ShowModalFormPacket.create();
-        pk.id = submitted.id;
-        pk.content = JSON.stringify(this.data);
-        pk.sendTo(target);
-        pk.dispose();
-        if (this.externalLoading) {
-            setTimeout(() => {
-                const pk = SetTitlePacket.create();
-                pk.sendTo(target);
-                pk.dispose();
-            }, 1000);
-        }
-        return pk.id;
+        return opts.id!;
     }
 
     toJSON():FormData {
         return this.data;
+    }
+}
+
+export namespace Form {
+    export interface Options {
+        /**
+         * a field for the output.
+         * this function will record the id to it
+         */
+        id?:number;
     }
 }
 
@@ -289,11 +286,8 @@ export class SimpleForm extends Form<FormDataSimple> {
             type: 'form',
             title,
             content,
-            buttons
+            buttons,
         });
-        for (const button of buttons) {
-            if (button.image?.type === "url") this.externalLoading = true;
-        }
     }
     getTitle():string {
         return this.data.title;
@@ -309,7 +303,6 @@ export class SimpleForm extends Form<FormDataSimple> {
     }
     addButton(button: FormButton, label?: string):void {
         this.data.buttons!.push(button);
-        if (button.image?.type === "url") this.externalLoading = true;
         if (label) this.labels.set(this.data.buttons!.length - 1, label);
     }
     getButton(indexOrLabel: string | number):FormButton | null {
@@ -365,7 +358,7 @@ export class CustomForm extends Form<FormDataCustom> {
         super({
             type: 'custom_form',
             title,
-            content: content as FormItem[]
+            content: content as FormItem[],
         });
     }
     getTitle():string {
@@ -390,9 +383,9 @@ export class CustomForm extends Form<FormDataCustom> {
     }
 }
 
-nethook.after(MinecraftPacketIds.ModalFormResponse).on((pk, ni) => {
+events.packetAfter(MinecraftPacketIds.ModalFormResponse).on((pk, ni) => {
     const sent = formMaps.get(pk.id);
-    if (sent === undefined) return;
+    if (sent == null) return;
     if (sent.networkIdentifier !== ni) return; // other user is responsing
     formMaps.delete(pk.id);
 

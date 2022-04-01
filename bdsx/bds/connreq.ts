@@ -1,13 +1,13 @@
-import { abstract } from "bdsx/common";
-import { CxxVector } from "bdsx/cxxvector";
-import { makefunc, RawTypeId } from "bdsx/makefunc";
-import { mce } from "bdsx/mce";
-import { nativeClass, NativeClass, nativeField } from "bdsx/nativeclass";
-import { CxxString, NativeType, uint8_t } from "bdsx/nativetype";
+import { CommandParameterType } from "../commandparam";
+import { abstract } from "../common";
+import { CxxVector } from "../cxxvector";
+import { makefunc } from "../makefunc";
+import { mce } from "../mce";
+import { nativeClass, NativeClass, nativeField } from "../nativeclass";
+import { bool_t, CxxString, int32_t, NativeType, uint8_t, void_t } from "../nativetype";
 import { proc, proc2 } from "./proc";
 
-export enum JsonValueType
-{
+export enum JsonValueType {
     Null = 0,
     Int32 = 1,
     Int64 = 2,
@@ -20,6 +20,9 @@ export enum JsonValueType
 
 @nativeClass(0x10)
 export class JsonValue extends NativeClass {
+    static readonly [CommandParameterType.symbol]:true;
+    static readonly symbol = 'Json::Value';
+
     @nativeField(uint8_t, 8)
     type:JsonValueType;
 
@@ -30,12 +33,59 @@ export class JsonValue extends NativeClass {
         abstract();
     }
 
+    static constructWith(value:unknown):JsonValue {
+        const json = new JsonValue(true);
+        json.constructWith(value);
+        return json;
+    }
+
+    constructWith(value:unknown):void {
+        switch (typeof value) {
+        case 'boolean':
+            this.type = JsonValueType.Boolean;
+            this.setBoolean(value);
+            break;
+        case 'number':
+            if ((value|0) === value) {
+                this.type = JsonValueType.Int32;
+                this.setInt32(value);
+            } else {
+                this.type = JsonValueType.Float64;
+                this.setFloat64(value);
+            }
+            break;
+        case 'object':
+            if (value === null) {
+                this.type = JsonValueType.Null;
+            } else {
+                jsonValueCtorWithType(this, JsonValueType.Object);
+                for (const [key, kv] of Object.entries(value)) {
+                    const child = jsonValueResolveReference(this, key, false);
+                    child.setValue(kv);
+                }
+            }
+            break;
+        case 'string':
+            jsonValueCtorWithString(this, value);
+            break;
+        default:
+            throw TypeError(`unexpected json type: ${typeof value}`);
+        }
+    }
+
     size():number {
         abstract();
     }
 
-    isMember(name:string):void {
+    isMember(name:string):boolean {
         abstract();
+    }
+
+    getByInt(key:number):JsonValue {
+        return jsonValueGetByInt(this, key);
+    }
+    getByString(key:string):JsonValue {
+        return jsonValueGetByString(this, key);
     }
 
     get(key:string|number):JsonValue {
@@ -51,8 +101,85 @@ export class JsonValue extends NativeClass {
     getMemberNames():string[] {
         const members:CxxVector<CxxString> = jsonValueGetMemberNames.call(this);
         const array = members.toArray();
-        members.dispose();
+        members.destruct();
         return array;
+    }
+
+    setValue(value:unknown):void {
+        this.destruct();
+        this.constructWith(value);
+    }
+
+    proxy():any {
+        switch (this.type) {
+        case JsonValueType.Array: {
+            const self = this;
+            const base:Record<string|symbol, any> = {};
+            return new Proxy(base, {
+                get(target, prop){
+                    if (typeof prop === 'symbol' || !/^\d+$/.test(prop)) {
+                        return base[prop];
+                    } else {
+                        const idx = +prop|0;
+                        if (idx < 0 || idx >= self.size()) return undefined;
+                        let v = base[idx];
+                        if (!(v instanceof JsonValue)) {
+                            v = self.getByInt(+prop|0);
+                            base[prop] = v;
+                        }
+                        return v.proxy();
+                    }
+                },
+                set(base, prop, value){
+                    if (typeof prop === 'symbol' || !/^\d+$/.test(prop)) {
+                        base[prop] = value;
+                    } else {
+                        let v = base[prop];
+                        if (!(v instanceof JsonValue)) {
+                            v = self.getByInt(+prop|0);
+                            base[prop] = v;
+                        }
+                        v.setValue(value);
+                    }
+                    return true;
+                },
+            });
+        }
+        case JsonValueType.Object: {
+            const self = this;
+            const base:Record<string|symbol, any> = {};
+            return new Proxy(base, {
+                get(base, prop){
+                    if (typeof prop === 'symbol') {
+                        return base[prop];
+                    } else {
+                        if (!self.isMember(prop)) return undefined;
+                        let v = base[prop];
+                        if (!(v instanceof JsonValue)) {
+                            v = self.getByString(prop);
+                            base[prop] = v;
+                        }
+                        return v.proxy();
+                    }
+                },
+                set(base, prop, value){
+                    if (typeof prop === 'symbol') {
+                        base[prop] = value;
+                    } else {
+                        let v = base[prop];
+                        if (!(v instanceof JsonValue)) {
+                            v = self.getByString(prop);
+                            base[prop] = v;
+                        }
+                        v.setValue(value);
+                    }
+                    return true;
+                },
+            });
+        }
+        default:
+            return this.value();
+        }
     }
 
     value():any {
@@ -92,21 +219,20 @@ export class JsonValue extends NativeClass {
         }
     }
 
-    valueOf():number {
-        return +this.value();
-    }
-
     toString():string {
         return this.value()+'';
     }
 }
-const jsonValueGetByInt = makefunc.js(proc2['??AValue@Json@@QEAAAEAV01@H@Z'], JsonValue, null, JsonValue, RawTypeId.Int32);
-const jsonValueGetByString = makefunc.js(proc2['??AValue@Json@@QEAAAEAV01@PEBD@Z'], JsonValue, null, JsonValue, RawTypeId.StringUtf8);
-const jsonValueGetMemberNames = makefunc.js(proc['Json::Value::getMemberNames'], CxxVector.make(CxxString), {this: JsonValue, structureReturn: true});
-JsonValue.prototype.isMember = makefunc.js(proc['Json::Value::isMember'], RawTypeId.Boolean, {this: JsonValue}, RawTypeId.StringUtf8);
-JsonValue.prototype.size = makefunc.js(proc['Json::Value::size'], RawTypeId.Int32, {this:JsonValue});
-JsonValue.prototype[NativeType.dtor] = makefunc.js(proc['Json::Value::~Value'], RawTypeId.Void, {this:JsonValue});
 
+const jsonValueCtorWithType = makefunc.js(proc2['??0Value@Json@@QEAA@W4ValueType@1@@Z'], JsonValue, null, JsonValue, int32_t);
+const jsonValueCtorWithString = makefunc.js(proc2['??0Value@Json@@QEAA@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@Z'], JsonValue, null, JsonValue, CxxString);
+const jsonValueGetByInt = makefunc.js(proc2['??AValue@Json@@QEAAAEAV01@H@Z'], JsonValue, null, JsonValue, int32_t);
+const jsonValueGetByString = makefunc.js(proc2['??AValue@Json@@QEAAAEAV01@PEBD@Z'], JsonValue, null, JsonValue, makefunc.Utf8);
+const jsonValueGetMemberNames = makefunc.js(proc['Json::Value::getMemberNames'], CxxVector.make(CxxString), {this: JsonValue, structureReturn: true});
+const jsonValueResolveReference = makefunc.js(proc['Json::Value::resolveReference'], JsonValue, null, JsonValue, makefunc.Utf8, bool_t);
+JsonValue.prototype.isMember = makefunc.js(proc['Json::Value::isMember'], bool_t, {this: JsonValue}, makefunc.Utf8);
+JsonValue.prototype.size = makefunc.js(proc['Json::Value::size'], int32_t, {this:JsonValue});
+JsonValue.prototype[NativeType.dtor] = makefunc.js(proc['Json::Value::~Value'], void_t, {this:JsonValue});
 
 @nativeClass(null)
 export class Certificate extends NativeClass {
@@ -132,7 +258,6 @@ export class Certificate extends NativeClass {
         return mce.UUID.toString(this.getIdentity());
     }
 }
-
 export class ConnectionRequest extends NativeClass {
     cert:Certificate;
     something:Certificate;
@@ -142,7 +267,43 @@ export class ConnectionRequest extends NativeClass {
         if (ptr === null) return null;
         return ptr.json;
     }
-    getJsonValue():any {
+    getJsonValue():{
+        AnimatedImageData:{AnimationExpression:number, Frames:number, Image:string, ImageHeight:number, ImageWidth:number, Type:number}[],
+        ArmSize:string,
+        CapeData:string,
+        CapeId:string,
+        CapeImageHeight:number,
+        CapeImageWidth:number,
+        CapeOnClassicSkin:boolean,
+        ClientRandomId:number,
+        CurrentInputMode:number,
+        DefaultInputMode:number,
+        DeviceId:string,
+        DeviceModel:string,
+        DeviceOS:number,
+        GameVersion:string,
+        GuiScale:number,
+        LanguageCode:string,
+        PersonaPieces:{IsDefault:boolean, PackId:string, PieceId:string, PieceType:string, ProductId:string}[],
+        PersonaSkin:boolean,
+        PieceTintColors:{Colors:[string, string, string, string], PieceType:string}[],
+        PlatformOfflineId:string,
+        PlatformOnlineId:string,
+        PlayFabId:string,
+        PremiumSkin:boolean,
+        SelfSignedId:string,
+        ServerAddress:string,
+        SkinAnimationData:string,
+        SkinColor:string,
+        SkinData:string,
+        SkinGeometryData:string,
+        SkinId:string,
+        SkinImageHeight:number,
+        SkinImageWidth:number,
+        SkinResourcePatch:string,
+        ThirdPartyName:string,
+        ThirdPartyNameOnly:boolean,
+        UIProfile:number }|null {
         return this.getJson()?.value();
     }
 
@@ -158,12 +319,3 @@ export class ConnectionRequest extends NativeClass {
         return +json.get('DeviceOS');
     }
 }
-
-/**
- * @deprecated typo!
- */
-export const ConnectionReqeust = ConnectionRequest;
-/**
- * @deprecated typo!
- */
-export type ConnectionReqeust = ConnectionRequest;

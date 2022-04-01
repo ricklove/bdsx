@@ -7,7 +7,7 @@
         {
             "runtimeExecutable": "${workspaceFolder}/bedrock_server/bedrock_server.exe",
             "cwd": "${workspaceFolder}/bedrock_server",
-            "type": "node",
+            "type": "legacy-node",
             "request": "launch",
             "name": "Launch BDSX",
             "args": ["${workspaceFolder}"],
@@ -24,8 +24,7 @@
             "skipFiles": [
                 "<node_internals>/**"
             ],
-            "runtimeArgs": ["--nolazy", "-r", "ts-node/register"],
-            "args": ["${workspaceFolder}/bdsx/installer/index.ts", "./bedrock_server", "-y"],
+            "args": ["${workspaceFolder}/bdsx/installer/installer.js", "./bedrock_server", "-y"],
             "console": "integratedTerminal",
 			"preLaunchTask": "${defaultBuildTask}"
         },
@@ -41,7 +40,7 @@
         },
         {
             "runtimeExecutable": "${workspaceFolder}/bedrock_server/bedrock_server.exe",
-            "type": "node",
+            "type": "legacy-node",
             "request": "launch",
             "name": "Launch Assembly Compiler",
             "skipFiles": [
@@ -49,6 +48,17 @@
             ],
             "args": ["${workspaceFolder}/bdsx/asm/compile.js"],
             "console": "integratedTerminal",
+			"preLaunchTask": "${defaultBuildTask}"
+        },
+        {
+            "runtimeExecutable": "${workspaceFolder}/bedrock_server/bedrock_server.exe",
+            "type": "legacy-node",
+            "request": "launch",
+            "name": "Launch Assembly Tests",
+            "skipFiles": [
+                "<node_internals>/**"
+            ],
+            "args": ["${workspaceFolder}/bdsx/asm/test/asmtest.js"],
 			"preLaunchTask": "${defaultBuildTask}"
         },
         {
@@ -65,7 +75,7 @@
         {
             "runtimeExecutable": "${workspaceFolder}/bedrock_server/bedrock_server.exe",
             "cwd": "${workspaceFolder}/bedrock_server",
-            "type": "node",
+            "type": "legacy-node",
             "request": "launch",
             "name": "Launch PDB Parser",
             "args": ["${workspaceFolder}/bdsx/pdbparser"],
@@ -73,6 +83,16 @@
                 "<node_internals>/**"
             ],
             "console": "integratedTerminal",
+			"preLaunchTask": "${defaultBuildTask}"
+        },
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Launch Shell Prelaunch",
+            "skipFiles": [
+                "<node_internals>/**"
+            ],
+            "args": ["${workspaceFolder}/bdsx/shellprepare.js"],
 			"preLaunchTask": "${defaultBuildTask}"
         }
     ]

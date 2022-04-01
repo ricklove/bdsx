@@ -1,6 +1,7 @@
-import { MinecraftPacketIds, nethook } from "bdsx";
+import { MinecraftPacketIds } from "bdsx/bds/packetids";
+import { events } from "bdsx/event";
 
-// Network Hooking: hook the sending StartGamePacket and hiding seeds
-nethook.send(MinecraftPacketIds.StartGame).on(packet=>{
+// Network Hooking: hook the sending StartGamePacket and hiding the seed
+events.packetSend(MinecraftPacketIds.StartGame).on(packet=>{
     packet.settings.seed = -123;
 });

@@ -1,29 +1,26 @@
 
-import { Register } from "bdsx/assembler";
-import { abstract } from "bdsx/common";
-import { dll } from "bdsx/dll";
-import { Hashable, HashSet } from "bdsx/hashset";
-import { makefunc, RawTypeId } from "bdsx/makefunc";
-import { nativeClass, NativeClass, nativeField } from "bdsx/nativeclass";
-import { CxxString, int32_t, NativeType } from "bdsx/nativetype";
-import { CxxStringWrapper } from "bdsx/pointer";
-import { SharedPtr } from "bdsx/sharedpointer";
-import { remapAndPrintError } from "bdsx/source-map-support";
-import { _tickCallback } from "bdsx/util";
-import { CapsuledEvent, Event } from "krevent";
+import { Register } from "../assembler";
+import { abstract } from "../common";
 import { StaticPointer, VoidPointer } from "../core";
-import { Packet } from "./packet";
-import { BatchedNetworkPeer, EncryptedNetworkPeer } from "./peer";
-import { ServerPlayer } from "./player";
+import { dll } from "../dll";
+import { events } from "../event";
+import { Hashable, HashSet } from "../hashset";
+import { makefunc } from "../makefunc";
+import { AbstractClass, nativeClass, NativeClass, nativeField } from "../nativeclass";
+import { bin64_t, CxxString, int32_t, NativeType, void_t } from "../nativetype";
+import { CxxStringWrapper } from "../pointer";
+import { remapAndPrintError } from "../source-map-support";
+import type { Packet } from "./packet";
+import type { ServerPlayer } from "./player";
 import { procHacker } from "./proc";
 import { RakNet } from "./raknet";
 import { RakNetInstance } from "./raknetinstance";
 
-export class NetworkHandler extends NativeClass {
+export class NetworkHandler extends AbstractClass {
     vftable:VoidPointer;
     instance:RakNetInstance;
 
-    send(ni:NetworkIdentifier, packet:Packet, u:number):void {
+    send(ni:NetworkIdentifier, packet:Packet, senderSubClientId:number):void {
         abstract();
     }
 
@@ -31,68 +28,75 @@ export class NetworkHandler extends NativeClass {
         abstract();
     }
 
-    getConnectionFromId(ni:NetworkIdentifier):NetworkHandler.Connection {
+    getConnectionFromId(ni:NetworkIdentifier):NetworkHandler.Connection|null {
         abstract();
     }
 }
 
-export namespace NetworkHandler
-{
-    export class Connection extends NativeClass {
+export namespace NetworkHandler {
+    export class Connection extends AbstractClass {
         networkIdentifier:NetworkIdentifier;
-        u1:VoidPointer;
-        u2:VoidPointer;
-        u3:VoidPointer;
-        epeer:SharedPtr<EncryptedNetworkPeer>;
-        bpeer:SharedPtr<BatchedNetworkPeer>;
-        bpeer2:SharedPtr<BatchedNetworkPeer>;
     }
 }
 
 @nativeClass(null)
-class ServerNetworkHandler$Client extends NativeClass {
+class ServerNetworkHandler$Client extends AbstractClass {
 }
 
 @nativeClass(null)
-export class ServerNetworkHandler extends NativeClass {
-    @nativeField(CxxString, 0x258)
-    motd: CxxString;
-    @nativeField(int32_t, 0x2D0)
-    maxPlayers: int32_t;
+export class ServerNetworkHandler extends AbstractClass {
+    @nativeField(VoidPointer)
+    vftable: VoidPointer;
+    @nativeField(CxxString, 0x278) // accessed in ServerNetworkHandler::allowIncomingConnections
+    readonly motd:CxxString;
+    @nativeField(int32_t, 0x2f0) // accessed in ServerNetworkHandler:setMaxNumPlayers
+    readonly maxPlayers: int32_t;
 
-    protected _disconnectClient(client:NetworkIdentifier, b:number, message:CxxStringWrapper, d:number):void {
+    protected _disconnectClient(client:NetworkIdentifier, unknown:number, message:CxxString, skipMessage:boolean):void {
         abstract();
     }
-    disconnectClient(client:NetworkIdentifier, message:string="disconnectionScreen.disconnected"):void {
-        const _message = new CxxStringWrapper(true);
-        _message[NativeType.ctor]();
-        _message.value = message;
-        this._disconnectClient(client, 0, _message, 0);
-        _message[NativeType.dtor]();
+    disconnectClient(client:NetworkIdentifier, message:string="disconnectionScreen.disconnected", skipMessage:boolean=false):void {
+        this._disconnectClient(client, 0, message, skipMessage);
     }
+    /**
+     * @alias allowIncomingConnections
+     */
     setMotd(motd:string):void {
-        this.motd = motd;
-        this.updateServerAnnouncement();
+        this.allowIncomingConnections(motd, true);
     }
+    /**
+     * @deprecated use setMaxNumPlayers
+     */
     setMaxPlayers(count:number):void {
-        this.maxPlayers = count;
-        this.updateServerAnnouncement();
+        this.setMaxNumPlayers(count);
+    }
+    allowIncomingConnections(motd:string, b:boolean):void {
+        abstract();
     }
     updateServerAnnouncement():void {
         abstract();
     }
+    setMaxNumPlayers(n:number):void {
+        abstract();
+    }
+    /**
+     * it's the same with `client.getActor()`
+     */
+    _getServerPlayer(client:NetworkIdentifier, clientSubId:number):ServerPlayer|null {
+        abstract();
+    }
 }
 
-export namespace ServerNetworkHandler
-{
+export namespace ServerNetworkHandler {
     export type Client = ServerNetworkHandler$Client;
 }
 
 const identifiers = new HashSet<NetworkIdentifier>();
-const closeEvTarget = new Event<(ni:NetworkIdentifier)=>void>();
 
 @nativeClass()
 export class NetworkIdentifier extends NativeClass implements Hashable {
+    @nativeField(bin64_t)
+    unknown:bin64_t;
     @nativeField(RakNet.AddressOrGUID)
     public address:RakNet.AddressOrGUID;
 
@@ -126,30 +130,27 @@ export class NetworkIdentifier extends NativeClass implements Hashable {
         return this.getAddress();
     }
 
-    static readonly close:CapsuledEvent<(ni:NetworkIdentifier)=>void> = closeEvTarget;
     static fromPointer(ptr:StaticPointer):NetworkIdentifier {
         return identifiers.get(ptr.as(NetworkIdentifier))!;
     }
-    static [makefunc.np2js](ptr:NetworkIdentifier):NetworkIdentifier {
-        let ni = identifiers.get(ptr);
-        if (ni) return ni;
-        ni = new NetworkIdentifier(true);
-        ni.copyFrom(ptr, NetworkIdentifier[NativeType.size]);
-        identifiers.add(ni);
-        return ni;
-    }
-
     static all():IterableIterator<NetworkIdentifier> {
         return identifiers.values();
     }
 }
-
+NetworkIdentifier.setResolver(ptr=>{
+    if (ptr === null) return null;
+    let ni = identifiers.get(ptr.as(NetworkIdentifier));
+    if (ni != null) return ni;
+    ni = new NetworkIdentifier(true);
+    (ni as any).copyFrom(ptr, NetworkIdentifier[NativeType.size]);
+    identifiers.add(ni);
+    return ni;
+});
 export let networkHandler:NetworkHandler;
 
-procHacker.hookingRawWithCallOriginal('NetworkHandler::onConnectionClosed#1', makefunc.np((handler, ni, msg)=>{
+procHacker.hookingRawWithCallOriginal('?onConnectionClosed@NetworkHandler@@EEAAXAEBVNetworkIdentifier@@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@_N@Z', makefunc.np((handler, ni, msg)=>{
     try {
-        closeEvTarget.fire(ni);
-        _tickCallback();
+        events.networkDisconnected.fire(ni);
     } catch (err) {
         remapAndPrintError(err);
     }
@@ -158,5 +159,5 @@ procHacker.hookingRawWithCallOriginal('NetworkHandler::onConnectionClosed#1', ma
     setTimeout(()=>{
         identifiers.delete(ni);
     }, 3000);
-}, RawTypeId.Void, null, NetworkHandler, NetworkIdentifier, CxxStringWrapper),
+}, void_t, {name: 'hook of NetworkIdentifier dtor'}, NetworkHandler, NetworkIdentifier, CxxStringWrapper),
 [Register.rcx, Register.rdx, Register.r8, Register.r9], []);
