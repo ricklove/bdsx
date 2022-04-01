@@ -20,6 +20,7 @@
   "dependencies": {
     "bdsx": "file:bdsx",
     "blessed": "^0.1.81",
+    "clear-module": "^4.1.1",
     "colors": "1.4.0 || ^1.4.3",
     "follow-redirects": "^1.14.7",
     "glob": "^7.2.0",

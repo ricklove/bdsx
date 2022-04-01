@@ -15,6 +15,8 @@ const getNetworkIdentifierAlias = (networkIdentifier: NetworkIdentifier) => netw
 export const createFormsApiDependencies = (): FormsApiDependenciesType => {
     return {
         sendForm: ({ formId, content, networkIdentifier }) => {
+            // console.log('sendForm', { formId, content, networkIdentifier });
+
             const packet = ModalFormRequestPacket.allocate();
             packet.id = formId;
             packet.content = content;
@@ -23,6 +25,8 @@ export const createFormsApiDependencies = (): FormsApiDependenciesType => {
         },
         onFormResponse: (callback) => {
             events.packetAfter(MinecraftPacketIds.ModalFormResponse).on((packet, networkIdentifier) => {
+                // console.log('onFormResponse', { packet, networkIdentifier });
+
                 try {
                     callback({ formId: packet.id, rawData: packet.response, networkIdentifier: getNetworkIdentifierAlias(networkIdentifier) });
                 } catch (err) {
@@ -37,6 +41,8 @@ export const createConnectionsTrackingServiceDependencies = (): ConnectionsTrack
     return {
         onLogin: (callback) => {
             events.packetAfter(MinecraftPacketIds.Login).on((ptr, networkIdentifier, packetId) => {
+                // console.log('onLogin', { ptr, networkIdentifier, packetId });
+
                 if(!ptr.connreq){ return; }
                 callback({
                     networkIdentifier: getNetworkIdentifierAlias(networkIdentifier),
@@ -47,6 +53,8 @@ export const createConnectionsTrackingServiceDependencies = (): ConnectionsTrack
         },
         onClose: (callback) => {
             events.networkDisconnected.on((networkIdentifier) => {
+                // console.log('onClose', { networkIdentifier });
+
                 callback({ networkIdentifier: getNetworkIdentifierAlias(networkIdentifier) });
             });
         },
@@ -58,6 +66,8 @@ export const createCommandServiceDependencies = (connectionsTracking: Connection
     return {
         onPlayerCommand: (callback) => {
             events.command.on((cmd, originName) => {
+                // console.log('onPlayerCommand', { cmd, originName });
+
                 const { networkIdentifier } = connectionsTracking.getPlayerConnections().find(x => x.playerName === originName) ?? {};
                 if (!networkIdentifier) { return; }
 
@@ -66,6 +76,8 @@ export const createCommandServiceDependencies = (connectionsTracking: Connection
         },
         onServerCommand: (callback) => {
             events.command.on((cmd, originName) => {
+                // console.log('onServerCommand', { cmd, originName });
+
                 if (originName !== 'server') { return; }
 
                 callback({ command: cmd });
@@ -75,6 +87,8 @@ export const createCommandServiceDependencies = (connectionsTracking: Connection
 };
 
 export const createServices = (): ServicesType => {
+
+    console.log('createServices');
 
     const formsService = createFormsApi(createFormsApiDependencies());
     const connectionsService = createConnectionsTrackingService(createConnectionsTrackingServiceDependencies());
