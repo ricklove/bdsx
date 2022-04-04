@@ -1,0 +1,3 @@
+[submodule "bedrock_server/worlds"]
+	path = bedrock_server/worlds
+	url = https://github.com/ricklove/love-family-minecraft-worlds.git
